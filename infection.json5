@@ -1,0 +1,61 @@
+{
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": ["src"]
+    },
+    "logs": {
+        "text": "php://stderr",
+        "summary": "build/infection-summary.log"
+    },
+    // RedisBulkheadStore/ApcuBulkheadStore are covered by the Integration suite
+    // (#[Covers], not #[CoversNothing] - the latter zeroes mutation attribution
+    // entirely in testo/infection, it isn't merely deprioritized). Needs
+    // REDIS_HOST + ext-apcu (apc.enable_cli=1) reachable, or their MSI drops.
+    //
+    // 86 is the honest floor for what infection's coverage-based test selection
+    // can see (the equivalent `max(0,x)`->`max(-1,x)` mutants are provably
+    // unkillable - x is never negative - but occasionally register as "killed"
+    // by run-to-run noise rather than any real test, so don't read 87 in one run
+    // as the gate moving; 86 is the value to set, not chase back up). Remaining
+    // survivors are equivalent / performance-only mutants:
+    //  - InMemoryBulkheadStore `$active[$token] = true` -> `false`: only the key
+    //    matters to count(), the value is an unread marker;
+    //  - SharedBulkhead/RedisBulkheadStore `max(0, ...)` -> `max(-1, ...)`: the
+    //    difference is never negative (activeCount >= 0 always), floor unreachable;
+    //  - ApcuBulkheadStore/RedisBulkheadStore key-concat reorder (`$a.$b`-> `$b.$a`):
+    //    cosmetic, no test can distinguish two equally-injective orderings;
+    //  - ApcuBulkheadStore::lockKey ConcatOperandRemoval (drops prefix or name):
+    //    verified with differentKeyPrefixesAreIsolated/namesAreIsolated still
+    //    passing - collapses two stores'/names' lock onto the same key, which only
+    //    adds contention, the slots key (and thus correctness) stays unaffected;
+    //  - ApcuBulkheadStore::lock loop off-by-one (`$attempt=-1` / `<=`): changes
+    //    the retry budget by one iteration, unobservable externally;
+    //  - ApcuBulkheadStore::liveSlots `>` -> `>=`: a millisecond-boundary
+    //    equality at expiry; no clock injection exists to hit it deterministically
+    //    (same implicit-clock coupling as Redis's `TIME`-based Lua script);
+    //  - ApcuBulkheadStore::release UnwrapFinally: the `finally`-only-runs-on
+    //    exception difference needs apcu_store/liveSlots to throw, which isn't
+    //    reachable without faking the extension;
+    //  - ApcuBulkheadStore::isAvailable `&&` -> `||`: only distinguishable when
+    //    ext-apcu is loaded but apc.enable_cli is off, a CLI-disabled-but-loaded
+    //    state the test environments don't construct.
+    "testFramework": "testo",
+    "minMsi": 86,
+    "mutators": {
+        "@default": true,
+        "Identical": {
+            // ApcuBulkheadStore::lock's `apcu_add(...) === true` flipped to `!==`
+            // genuinely breaks mutual exclusion under concurrent contention -
+            // verified by hand-mutating the source and running
+            // neverExceedsMaxConcurrentUnderRealForkContention (tests/Integration/
+            // ApcuBulkheadIntegrationTest.php): 5/5 passed unmutated, 5/5 failed
+            // mutated. Not equivalent - ignored only because pcov coverage doesn't
+            // propagate from pcntl_fork()'d children back to the parent process's
+            // report, so infection's coverage-based test selection never picks
+            // that test for this mutant and it escapes despite being killed.
+            "ignore": [
+                "Rasuvaeff\\Bulkhead\\ApcuBulkheadStore::lock"
+            ]
+        }
+    }
+}

@@ -1,0 +1,288 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Rasuvaeff\Bulkhead\Tests;
+
+use Rasuvaeff\Bulkhead\BulkheadFullException;
+use Rasuvaeff\Bulkhead\BulkheadStore;
+use Rasuvaeff\Bulkhead\InMemoryBulkheadStore;
+use Rasuvaeff\Bulkhead\SharedBulkhead;
+use Rasuvaeff\Bulkhead\Sleeper\FakeSleeper;
+use Rasuvaeff\Duration\Duration;
+use Testo\Assert;
+use Testo\Codecov\Covers;
+use Testo\Expect;
+use Testo\Test;
+
+#[Test]
+#[Covers(SharedBulkhead::class)]
+final class SharedBulkheadTest
+{
+    public function runsCallbackAndReturnsItsResult(): void
+    {
+        $bulkhead = $this->bulkhead(maxConcurrent: 1);
+
+        $result = $bulkhead->call(static fn(): int => 42);
+
+        Assert::same($result, 42);
+    }
+
+    public function releasesSlotAfterSuccessfulCall(): void
+    {
+        $bulkhead = $this->bulkhead(maxConcurrent: 1);
+
+        $bulkhead->call(static fn(): int => 1);
+
+        Assert::same($bulkhead->availableSlots(), 1);
+    }
+
+    public function releasesSlotWhenCallbackThrows(): void
+    {
+        $bulkhead = $this->bulkhead(maxConcurrent: 1);
+
+        try {
+            $bulkhead->call(static fn(): never => throw new \RuntimeException('boom'));
+        } catch (\RuntimeException) {
+        }
+
+        Assert::same($bulkhead->availableSlots(), 1);
+    }
+
+    public function fastFailsWhenFullAndMaxWaitIsZero(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $store->tryAcquire('svc', 1, Duration::seconds(5));
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+        );
+
+        Expect::exception(BulkheadFullException::class)->withMessageContaining('is full (max 1 concurrent)');
+
+        $bulkhead->call(static fn(): int => 1);
+    }
+
+    public function exposesNameAndLimitOnFullException(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $store->tryAcquire('svc', 1, Duration::seconds(5));
+        $bulkhead = new SharedBulkhead('svc', 1, $store, Duration::seconds(5), Duration::zero());
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+            Assert::true(false);
+        } catch (BulkheadFullException $e) {
+            Assert::same($e->name, 'svc');
+            Assert::same($e->maxConcurrent, 1);
+        }
+    }
+
+    public function invokesOnRejectedWhenFull(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $store->tryAcquire('svc', 1, Duration::seconds(5));
+        $rejected = null;
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            onRejected: function (string $name) use (&$rejected): void {
+                $rejected = $name;
+            },
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+        } catch (BulkheadFullException) {
+        }
+
+        Assert::same($rejected, 'svc');
+    }
+
+    public function invokesOnAcceptedWhenSlotTaken(): void
+    {
+        $accepted = null;
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: new InMemoryBulkheadStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            onAccepted: function (string $name) use (&$accepted): void {
+                $accepted = $name;
+            },
+        );
+
+        $bulkhead->call(static fn(): int => 1);
+
+        Assert::same($accepted, 'svc');
+    }
+
+    public function waitsThenAcquiresWhenSlotFreesDuringPolling(): void
+    {
+        $store = $this->scriptedStore(nullsBeforeToken: 2);
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(500),
+            pollInterval: Duration::millis(50),
+            sleeper: $sleeper,
+        );
+
+        $result = $bulkhead->call(static fn(): string => 'ok');
+
+        Assert::same($result, 'ok');
+        Assert::same(count($sleeper->slept()), 2);
+    }
+
+    public function waitBudgetIsBoundedByMaxWait(): void
+    {
+        $store = $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX);
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(120),
+            pollInterval: Duration::millis(50),
+            sleeper: $sleeper,
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+            Assert::true(false);
+        } catch (BulkheadFullException) {
+        }
+
+        // 50 + 50 + 20 (clamped to the remaining budget) = 120ms exactly.
+        Assert::same($sleeper->totalSlept()->toMillis(), 120);
+    }
+
+    public function availableSlotsReflectsActiveCount(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $store->tryAcquire('svc', 3, Duration::seconds(5));
+        $bulkhead = new SharedBulkhead('svc', 3, $store, Duration::seconds(5), Duration::zero());
+
+        Assert::same($bulkhead->availableSlots(), 2);
+    }
+
+    public function availableSlotsIsZeroWhenFull(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $store->tryAcquire('svc', 2, Duration::seconds(5));
+        $store->tryAcquire('svc', 2, Duration::seconds(5));
+        $bulkhead = new SharedBulkhead('svc', 2, $store, Duration::seconds(5), Duration::zero());
+
+        Assert::same($bulkhead->availableSlots(), 0);
+    }
+
+    public function usesFiftyMillisecondDefaultPollInterval(): void
+    {
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: 1),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(500),
+            sleeper: $sleeper,
+        );
+
+        $bulkhead->call(static fn(): int => 1);
+
+        Assert::same($sleeper->slept()[0]->toMillis(), 50);
+    }
+
+    public function rejectsEmptyName(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Invalid bulkhead name');
+
+        new SharedBulkhead('', 1, new InMemoryBulkheadStore(), Duration::seconds(5), Duration::zero());
+    }
+
+    public function rejectsNameWithIllegalCharacters(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Invalid bulkhead name');
+
+        new SharedBulkhead('bad name', 1, new InMemoryBulkheadStore(), Duration::seconds(5), Duration::zero());
+    }
+
+    public function rejectsNonPositiveMaxConcurrent(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Max concurrent must be greater than or equal to 1');
+
+        new SharedBulkhead('svc', 0, new InMemoryBulkheadStore(), Duration::seconds(5), Duration::zero());
+    }
+
+    public function rejectsZeroLease(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Lease must be greater than zero');
+
+        new SharedBulkhead('svc', 1, new InMemoryBulkheadStore(), Duration::zero(), Duration::zero());
+    }
+
+    public function rejectsZeroPollInterval(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Poll interval must be greater than zero');
+
+        new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: new InMemoryBulkheadStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(100),
+            pollInterval: Duration::zero(),
+        );
+    }
+
+    private function bulkhead(int $maxConcurrent): SharedBulkhead
+    {
+        return new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: $maxConcurrent,
+            store: new InMemoryBulkheadStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+        );
+    }
+
+    private function scriptedStore(int $nullsBeforeToken): BulkheadStore
+    {
+        return new class ($nullsBeforeToken) implements BulkheadStore {
+            private int $attempts = 0;
+
+            public function __construct(
+                private readonly int $nullsBeforeToken,
+            ) {}
+
+            #[\Override]
+            public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string
+            {
+                $current = $this->attempts;
+                ++$this->attempts;
+
+                return $current < $this->nullsBeforeToken ? null : 'token';
+            }
+
+            #[\Override]
+            public function release(string $name, string $token): void {}
+
+            #[\Override]
+            public function activeCount(string $name): int
+            {
+                return 0;
+            }
+        };
+    }
+}

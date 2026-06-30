@@ -1,0 +1,90 @@
+# bulkhead
+
+Cross-process concurrency limiter (bulkhead) for PHP-FPM. Caps simultaneous
+calls to a dependency across the whole worker pool via a shared Redis or APCu
+counter.
+
+Install:
+
+```
+composer require rasuvaeff/bulkhead
+```
+
+Runtime deps: `rasuvaeff/duration`, `predis/predis` ^2.2 (pure-PHP), a reachable
+Redis server for `RedisBulkheadStore` (multi-host). `ext-apcu` for
+`ApcuBulkheadStore` (single-host) — `suggest`-only, not a hard dependency.
+Namespace `Rasuvaeff\Bulkhead`.
+
+## Rules
+
+- PHP 8.3+, `declare(strict_types=1)`, immutable `final readonly` classes.
+- `lease` MUST exceed the longest expected callback runtime, or the slot is
+  reclaimed mid-call and concurrency exceeds `maxConcurrent`.
+- `maxWait` = `Duration::zero()` means fast-fail; otherwise the call polls up to
+  `maxWait` (approximate, poll-based bound; default 50ms granularity).
+- `name` must match `/^[A-Za-z0-9_.:-]+$/` (it becomes part of the Redis/APCu key).
+- `InMemoryBulkheadStore` is single-process only (tests/CLI) — not a pool limiter.
+- `ApcuBulkheadStore` only coordinates workers on the same host (APCu shared
+  memory doesn't span machines) — use `RedisBulkheadStore` across hosts.
+- Redis acquire is atomic via one Lua script (prune expired -> check ZCARD <
+  max -> ZADD). APCu has no server-side scripting, so `ApcuBulkheadStore` gets
+  the same atomicity from a short-lived `apcu_add` spinlock around the
+  read-check-write.
+- Implement `BulkheadScriptRunner` to back the Redis store with phpredis
+  instead of predis.
+
+## API
+
+```php
+use Predis\Client;
+use Rasuvaeff\Bulkhead\BulkheadFullException;
+use Rasuvaeff\Bulkhead\Redis\PredisScriptRunner;
+use Rasuvaeff\Bulkhead\RedisBulkheadStore;
+use Rasuvaeff\Bulkhead\SharedBulkhead;
+use Rasuvaeff\Duration\Duration;
+
+$bulkhead = new SharedBulkhead(
+    name: 'legacy-api',
+    maxConcurrent: 10,
+    store: new RedisBulkheadStore(new PredisScriptRunner(new Client(['host' => '127.0.0.1']))),
+    lease: Duration::seconds(5),
+    maxWait: Duration::millis(200),         // Duration::zero() = fast-fail
+    // optional: pollInterval, sleeper, onAccepted, onRejected (Closure(string $name): void)
+);
+
+try {
+    $value = $bulkhead->call(static fn(): string => callDownstream());
+} catch (BulkheadFullException $e) {
+    // $e->name, $e->maxConcurrent — degrade gracefully
+}
+
+$bulkhead->availableSlots(); // int >= 0
+```
+
+Single-host, no Redis:
+
+```php
+use Rasuvaeff\Bulkhead\ApcuBulkheadStore;
+
+$bulkhead = new SharedBulkhead('svc', 10, new ApcuBulkheadStore(), Duration::seconds(5), Duration::millis(200));
+```
+
+In-process (tests / CLI), no Redis/APCu:
+
+```php
+use Rasuvaeff\Bulkhead\InMemoryBulkheadStore;
+
+$bulkhead = new SharedBulkhead('svc', 2, new InMemoryBulkheadStore(), Duration::seconds(5), Duration::zero());
+```
+
+### BulkheadStore (implement for a custom backend)
+
+```php
+interface BulkheadStore
+{
+    // non-empty-string token on success, null when full
+    public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string;
+    public function release(string $name, string $token): void;
+    public function activeCount(string $name): int;
+}
+```

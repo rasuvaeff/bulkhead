@@ -1,0 +1,22 @@
+{
+    "symbol-whitelist": [
+        "apcu_add",
+        "apcu_delete",
+        "apcu_enabled",
+        "apcu_fetch",
+        "apcu_store"
+    ],
+    "php-core-extensions": [
+        "Core",
+        "date",
+        "json",
+        "hash",
+        "pcre",
+        "Phar",
+        "Reflection",
+        "SPL",
+        "random",
+        "standard"
+    ],
+    "scan-files": []
+}
