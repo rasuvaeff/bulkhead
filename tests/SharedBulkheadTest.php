@@ -10,6 +10,9 @@ use Rasuvaeff\Bulkhead\InMemoryBulkheadStore;
 use Rasuvaeff\Bulkhead\SharedBulkhead;
 use Rasuvaeff\Bulkhead\Sleeper\FakeSleeper;
 use Rasuvaeff\Duration\Duration;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Expect;
@@ -244,6 +247,42 @@ final class SharedBulkheadTest
             maxWait: Duration::millis(100),
             pollInterval: Duration::zero(),
         );
+    }
+
+    #[Property(runs: 150)]
+    public function waitBudgetNeverExceedsMaxWait(int $maxWaitMillis, int $pollMillis): void
+    {
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis($maxWaitMillis),
+            pollInterval: Duration::millis($pollMillis),
+            sleeper: $sleeper,
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+            Assert::true(false);
+        } catch (BulkheadFullException) {
+        }
+
+        Assert::same($sleeper->totalSlept()->toMillis(), $maxWaitMillis);
+
+        foreach ($sleeper->slept() as $sleep) {
+            Assert::true($sleep->toMillis() <= $pollMillis);
+        }
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    private function waitBudgetNeverExceedsMaxWaitGenerators(): array
+    {
+        return [
+            'maxWaitMillis' => Gen::intBetween(0, 2000),
+            'pollMillis' => Gen::intBetween(10, 200),
+        ];
     }
 
     private function bulkhead(int $maxConcurrent): SharedBulkhead

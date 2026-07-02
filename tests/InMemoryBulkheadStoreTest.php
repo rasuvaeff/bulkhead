@@ -115,4 +115,31 @@ final class InMemoryBulkheadStoreTest
             'attempts' => Gen::intBetween(0, 40),
         ];
     }
+
+    #[Property(runs: 150)]
+    public function releasingEveryTokenRestoresFullCapacity(int $max): void
+    {
+        $store = new InMemoryBulkheadStore();
+
+        $tokens = [];
+        while (($token = $store->tryAcquire('svc', $max, $this->lease)) !== null) {
+            $tokens[] = $token;
+        }
+
+        Assert::same(count($tokens), $max);
+        Assert::same($store->activeCount('svc'), $max);
+
+        foreach ($tokens as $token) {
+            $store->release('svc', $token);
+        }
+
+        Assert::same($store->activeCount('svc'), 0);
+        Assert::true($store->tryAcquire('svc', $max, $this->lease) !== null);
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    private function releasingEveryTokenRestoresFullCapacityGenerators(): array
+    {
+        return ['max' => Gen::intBetween(1, 30)];
+    }
 }
