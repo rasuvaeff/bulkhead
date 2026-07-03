@@ -8,7 +8,9 @@ Guidance for AI agents working on this package. Read before changing code.
 (namespace `Rasuvaeff\Bulkhead`). `SharedBulkhead` admits at most
 `maxConcurrent` simultaneous `call()`s, counted across every process that shares
 a `BulkheadStore`. Two cross-process backends: `RedisBulkheadStore` (sorted set +
-Lua, atomic acquire, multi-host) and `ApcuBulkheadStore` (APCu spinlock over
+Lua, atomic acquire, multi-host; client-agnostic via `BulkheadScriptRunner` —
+`Redis\PredisScriptRunner` for predis, `Redis\PhpRedisScriptRunner` for
+`ext-redis`, both EVALSHA-first) and `ApcuBulkheadStore` (APCu spinlock over
 `apcu_add`, single-host only); `InMemoryBulkheadStore` is single-process only
 (tests/CLI). Lease/wait values are `rasuvaeff/duration` `Duration`s.
 
@@ -17,8 +19,9 @@ Lua, atomic acquire, multi-host) and `ApcuBulkheadStore` (APCu spinlock over
 1. **Verification is mandatory.** Never claim "done" without a fresh green
    `composer build`. "Should work" does not count.
 2. **No suppressions.** No `@psalm-suppress`, no baseline. Fix the root cause.
-   (The one untyped boundary — predis `__call` — is isolated to
-   `Redis\PredisScriptRunner`, which casts the `mixed` reply once.)
+   (The untyped Redis-client boundaries — predis `__call`, phpredis `mixed`
+   replies — are isolated to `Redis\PredisScriptRunner`/`Redis\PhpRedisScriptRunner`,
+   which cast the `mixed` reply once.)
 3. **`lease` must outlive the work it protects, and acquire must stay atomic.**
    The lease TTL is what reclaims a dead worker's slot; if a callback can run
    longer than its lease, the slot is reclaimed mid-call and concurrency exceeds
@@ -65,10 +68,12 @@ docker run --rm --network host -v "$PWD":/repo -w /repo/bulkhead -e REDIS_HOST=1
 docker rm -f bh-redis
 ```
 
-The pcov image needs `apcu` + `pcntl` extensions and `apc.enable_cli=1`
-(`pecl install pcov apcu`, `docker-php-ext-install pcntl`, then an ini file with
-`apc.enable_cli=1` — see `.github/workflows/build.yml`'s `coverage` job for the
-exact extension list). `pcntl` backs
+The pcov image needs `apcu` + `pcntl` + `redis` extensions and `apc.enable_cli=1`
+(`pecl install pcov apcu redis`, `docker-php-ext-install pcntl`, then an ini file
+with `apc.enable_cli=1` — see `.github/workflows/build.yml`'s `coverage` job for
+the exact extension list). `redis` backs `PhpRedisIntegrationTest`, which is the
+only coverage `PhpRedisScriptRunner` gets — run mutation without `ext-redis` and
+its mutants all escape. `pcntl` backs
 `ApcuBulkheadIntegrationTest::neverExceedsMaxConcurrentUnderRealForkContention`,
 which forks real processes behind a rendezvous barrier (`apcu_inc`/poll) to
 race for the same slots — a single-process test cannot distinguish a correct
@@ -83,7 +88,7 @@ this test — don't shrink the worker count/hold time without re-verifying
 against a hand-mutated `lock()` first.
 
 CI runs the Integration suite and mutation in the `coverage` job, which provides
-a `redis:7-alpine` service container + `REDIS_HOST`, plus `apcu`/`pcntl`.
+a `redis:7-alpine` service container + `REDIS_HOST`, plus `apcu`/`pcntl`/`redis`.
 
 ## Invariants & gotchas
 
@@ -92,13 +97,26 @@ a `redis:7-alpine` service container + `REDIS_HOST`, plus `apcu`/`pcntl`.
   sleep with `Duration::minus` (saturating), so the budget is bounded but
   approximate (per-attempt Redis latency is not counted).
 - `name` is validated (`/^[A-Za-z0-9_.:-]+$/`) because it becomes a Redis/APCu key.
-- predis is pure-PHP — no `ext-redis` needed; `composer:2` and psalm work without
-  a Redis extension. `ext-apcu` is `suggest`-only (not `require`) — installing
-  bulkhead must not force the extension on consumers who only use Redis; psalm
-  resolves `apcu_*` signatures from its bundled `jetbrains/phpstorm-stubs` call
-  map regardless of whether the extension is actually loaded, so static analysis
-  needs no extra config. `composer-require-checker.json` whitelists the `apcu_*`
-  symbols (no required package declares them). `property-testing` (dev) needs
+- `pollJitter` (0.0..1.0) randomizes each poll sleep within ±(jitter × pollInterval)
+  with a **1µs floor** — the `max(1, ...)` in `jitteredPollInterval` is what stops a
+  zero-length sleep from spinning the wait loop without consuming budget; don't
+  remove it. `onAccepted`/`onRejected` receive `(string $name, Duration $waited)`.
+- The acquire Lua script must never *shrink* the key TTL (`PTTL` guard before
+  `PEXPIRE`): a shorter lease on the same name would otherwise expire the whole
+  sorted set under longer-lease members
+  (`shorterLeaseDoesNotExpireLongerLeasedSlots` covers this).
+- **All Redis clients are optional deps.** `predis/predis` lives in `require-dev`
+  + `suggest` (NOT `require`) — an APCu-only or in-memory consumer must not pull
+  a Redis client; `ext-redis` is `suggest`-only likewise. `ext-apcu` is
+  `suggest`-only (not `require`) — installing bulkhead must not force the
+  extension on consumers who only use Redis. Psalm resolves `apcu_*` signatures
+  from its bundled `jetbrains/phpstorm-stubs` call map regardless of whether the
+  extension is loaded; the `\Redis` class comes from psalm's bundled
+  `redis.phpstub` via `<enableExtensions><extension name="redis"/>` in
+  `psalm.xml` — so static analysis needs no extensions installed.
+  `composer-require-checker.json` whitelists the `apcu_*` symbols plus
+  `Predis\ClientInterface`, `Predis\Response\ServerException` and `Redis` (no
+  required package declares them). `property-testing` (dev) needs
   `ext-mbstring` → CI `extensions: json, mbstring`.
 - Mutation `minMsi` 86 is the honest floor for what infection's coverage-based
   test selection can see; survivors are documented per-mutant in

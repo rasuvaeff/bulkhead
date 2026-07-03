@@ -19,17 +19,39 @@ use Rasuvaeff\Duration\Duration;
  * Not cross-host: APCu's shared memory segment is local to one machine. Use
  * {@see RedisBulkheadStore} to bound a pool spread across multiple hosts.
  *
+ * Known compromise: APCu has no atomic compare-and-delete, so {@see unlock()}
+ * cannot verify lock ownership. If a lock holder stalls past LOCK_TTL_SECONDS
+ * inside the (microsecond-sized) critical section, its late unlock can delete a
+ * successor's lock and briefly break mutual exclusion. The TTL exists to
+ * un-deadlock crashed holders; the stall window it opens is accepted as
+ * negligible for a critical section this small.
+ *
  * @api
  */
 final readonly class ApcuBulkheadStore implements BulkheadStore
 {
     private const int LOCK_TTL_SECONDS = 1;
-    private const int LOCK_MAX_ATTEMPTS = 1_000;
-    private const int LOCK_RETRY_MICROS = 1_000;
 
+    /**
+     * @param int $lockMaxAttempts spin budget for the internal lock: acquire/release
+     *                             spin up to $lockMaxAttempts × $lockRetryMicros µs
+     *                             (default ~100ms) before giving up — tryAcquire then
+     *                             reports "full", release leaves the slot to expire
+     *                             with its lease
+     * @param int $lockRetryMicros pause between lock attempts, microseconds
+     */
     public function __construct(
         private string $keyPrefix = 'bulkhead:',
-    ) {}
+        private int $lockMaxAttempts = 100,
+        private int $lockRetryMicros = 1_000,
+    ) {
+        if ($lockMaxAttempts < 1) {
+            throw new \InvalidArgumentException('Lock max attempts must be greater than or equal to 1');
+        }
+        if ($lockRetryMicros < 1) {
+            throw new \InvalidArgumentException('Lock retry micros must be greater than or equal to 1');
+        }
+    }
 
     public static function isAvailable(): bool
     {
@@ -51,7 +73,9 @@ final readonly class ApcuBulkheadStore implements BulkheadStore
 
             $token = bin2hex(random_bytes(16));
             $slots[$token] = $this->nowMs() + $lease->toMillis();
-            apcu_store($this->slotsKey($name), $slots);
+            if (apcu_store($this->slotsKey($name), $slots) !== true) {
+                return null;
+            }
 
             return $token;
         } finally {
@@ -106,20 +130,22 @@ final readonly class ApcuBulkheadStore implements BulkheadStore
         /** @var mixed $stored */
         $stored = apcu_fetch($this->slotsKey($name));
 
-        /** @var array<non-empty-string, int> */
-        return is_array($stored) ? $stored : [];
+        /** @var array<non-empty-string, int> $slots */
+        $slots = is_array($stored) ? $stored : [];
+
+        return $slots;
     }
 
     private function lock(string $name): bool
     {
         $lockKey = $this->lockKey($name);
 
-        for ($attempt = 0; $attempt < self::LOCK_MAX_ATTEMPTS; ++$attempt) {
+        for ($attempt = 0; $attempt < $this->lockMaxAttempts; ++$attempt) {
             if (apcu_add($lockKey, true, self::LOCK_TTL_SECONDS) === true) {
                 return true;
             }
 
-            usleep(self::LOCK_RETRY_MICROS);
+            usleep($this->lockRetryMicros);
         }
 
         return false;

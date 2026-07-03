@@ -45,7 +45,7 @@ final class ApcuBulkheadIntegrationTest
         Assert::true($first !== null);
         Assert::true($second !== null);
         Assert::null($third);
-        Assert::same(strlen((string) $first), 32);
+        Assert::same(strlen($first), 32);
         Assert::same($this->store->activeCount(self::NAME), 2);
     }
 

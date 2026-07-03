@@ -95,7 +95,7 @@ final class SharedBulkheadTest
             store: $store,
             lease: Duration::seconds(5),
             maxWait: Duration::zero(),
-            onRejected: function (string $name) use (&$rejected): void {
+            onRejected: function (string $name, Duration $waited) use (&$rejected): void {
                 $rejected = $name;
             },
         );
@@ -117,7 +117,7 @@ final class SharedBulkheadTest
             store: new InMemoryBulkheadStore(),
             lease: Duration::seconds(5),
             maxWait: Duration::zero(),
-            onAccepted: function (string $name) use (&$accepted): void {
+            onAccepted: function (string $name, Duration $waited) use (&$accepted): void {
                 $accepted = $name;
             },
         );
@@ -233,6 +233,185 @@ final class SharedBulkheadTest
         Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Lease must be greater than zero');
 
         new SharedBulkhead('svc', 1, new InMemoryBulkheadStore(), Duration::zero(), Duration::zero());
+    }
+
+    public function onAcceptedReceivesTimeWaitedForSlot(): void
+    {
+        $waited = null;
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: 2),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(500),
+            pollInterval: Duration::millis(50),
+            sleeper: new FakeSleeper(),
+            onAccepted: function (string $name, Duration $duration) use (&$waited): void {
+                $waited = $duration;
+            },
+        );
+
+        $bulkhead->call(static fn(): int => 1);
+
+        Assert::same($waited?->toMillis(), 100);
+    }
+
+    public function onRejectedReceivesTimeWaitedBeforeGivingUp(): void
+    {
+        $waited = null;
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(120),
+            pollInterval: Duration::millis(50),
+            sleeper: new FakeSleeper(),
+            onRejected: function (string $name, Duration $duration) use (&$waited): void {
+                $waited = $duration;
+            },
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+        } catch (BulkheadFullException) {
+        }
+
+        Assert::same($waited?->toMillis(), 120);
+    }
+
+    public function exposesNameAndMaxConcurrent(): void
+    {
+        $bulkhead = $this->bulkhead(maxConcurrent: 3);
+
+        Assert::same($bulkhead->name(), 'svc');
+        Assert::same($bulkhead->maxConcurrent(), 3);
+    }
+
+    public function jitterKeepsPollSleepsWithinConfiguredBand(): void
+    {
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(500),
+            pollInterval: Duration::millis(50),
+            pollJitter: 0.5,
+            sleeper: $sleeper,
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+            Assert::true(false);
+        } catch (BulkheadFullException) {
+        }
+
+        Assert::same($sleeper->totalSlept()->toMillis(), 500);
+
+        $sleeps = $sleeper->slept();
+        $last = array_pop($sleeps);
+        Assert::true($last !== null && $last->toMicros() <= 75_000);
+
+        $jittered = false;
+        foreach ($sleeps as $sleep) {
+            Assert::true($sleep->toMicros() >= 25_000);
+            Assert::true($sleep->toMicros() <= 75_000);
+            $jittered = $jittered || $sleep->toMicros() !== 50_000;
+        }
+
+        // ~10 draws from ±25000µs all landing on exactly 50ms is (1/50001)^10.
+        Assert::true($jittered);
+    }
+
+    public function fullPollJitterIsAcceptedAndStillJitters(): void
+    {
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(500),
+            pollInterval: Duration::millis(50),
+            pollJitter: 1.0,
+            sleeper: $sleeper,
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+            Assert::true(false);
+        } catch (BulkheadFullException) {
+        }
+
+        Assert::same($sleeper->totalSlept()->toMillis(), 500);
+
+        $jittered = false;
+        foreach ($sleeper->slept() as $sleep) {
+            $jittered = $jittered || $sleep->toMicros() !== 50_000;
+        }
+
+        Assert::true($jittered);
+    }
+
+    public function jitteredSleepIsNeverBelowOneMicrosecond(): void
+    {
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            lease: Duration::seconds(5),
+            maxWait: Duration::micros(50),
+            pollInterval: Duration::micros(1),
+            pollJitter: 1.0,
+            sleeper: $sleeper,
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+            Assert::true(false);
+        } catch (BulkheadFullException) {
+        }
+
+        $min = PHP_INT_MAX;
+        foreach ($sleeper->slept() as $sleep) {
+            Assert::true($sleep->toMicros() >= 1);
+            $min = min($min, $sleep->toMicros());
+        }
+
+        // With ±1µs jitter on a 1µs interval the 1µs floor is hit almost surely
+        // within ~50 draws; a raised floor (max(2, ...)) would never produce it.
+        Assert::same($min, 1);
+    }
+
+    public function rejectsNegativePollJitter(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Poll jitter must be between 0 and 1');
+
+        new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: new InMemoryBulkheadStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            pollJitter: -0.1,
+        );
+    }
+
+    public function rejectsPollJitterAboveOne(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Poll jitter must be between 0 and 1');
+
+        new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: new InMemoryBulkheadStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            pollJitter: 1.1,
+        );
     }
 
     public function rejectsZeroPollInterval(): void

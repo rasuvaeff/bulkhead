@@ -31,8 +31,13 @@ final readonly class SharedBulkhead implements Bulkhead
      *                            concurrency can exceed $maxConcurrent
      * @param Duration  $maxWait  how long to wait for a slot before failing; zero = fast-fail
      * @param ?Duration $pollInterval polling granularity while waiting (default 50ms)
-     * @param (\Closure(string): void)|null $onAccepted
-     * @param (\Closure(string): void)|null $onRejected
+     * @param float     $pollJitter randomizes each poll sleep within ±(pollJitter × pollInterval),
+     *                            0.0..1.0; desynchronizes waiters so a freed slot is not
+     *                            stampeded by every worker at once
+     * @param (\Closure(string, Duration): void)|null $onAccepted receives the bulkhead
+     *                            name and how long the call waited for its slot
+     * @param (\Closure(string, Duration): void)|null $onRejected receives the bulkhead
+     *                            name and how long the call waited before giving up
      */
     public function __construct(
         string $name,
@@ -41,6 +46,7 @@ final readonly class SharedBulkhead implements Bulkhead
         private Duration $lease,
         private Duration $maxWait,
         ?Duration $pollInterval = null,
+        private float $pollJitter = 0.0,
         ?SleeperInterface $sleeper = null,
         private ?\Closure $onAccepted = null,
         private ?\Closure $onRejected = null,
@@ -53,6 +59,9 @@ final readonly class SharedBulkhead implements Bulkhead
         }
         if ($lease->isZero()) {
             throw new \InvalidArgumentException('Lease must be greater than zero');
+        }
+        if ($pollJitter < 0.0 || $pollJitter > 1.0) {
+            throw new \InvalidArgumentException('Poll jitter must be between 0 and 1');
         }
 
         $pollInterval ??= Duration::millis(50);
@@ -69,18 +78,18 @@ final readonly class SharedBulkhead implements Bulkhead
     #[\Override]
     public function call(callable $callback): mixed
     {
-        $token = $this->acquire();
+        [$token, $waited] = $this->acquire();
 
         if ($token === null) {
             if ($this->onRejected instanceof \Closure) {
-                ($this->onRejected)($this->name);
+                ($this->onRejected)($this->name, $waited);
             }
 
             throw new BulkheadFullException(name: $this->name, maxConcurrent: $this->maxConcurrent);
         }
 
         if ($this->onAccepted instanceof \Closure) {
-            ($this->onAccepted)($this->name);
+            ($this->onAccepted)($this->name, $waited);
         }
 
         try {
@@ -97,9 +106,26 @@ final readonly class SharedBulkhead implements Bulkhead
     }
 
     /**
-     * @return non-empty-string|null
+     * @return non-empty-string
      */
-    private function acquire(): ?string
+    public function name(): string
+    {
+        return $this->name;
+    }
+
+    /**
+     * @return positive-int
+     */
+    public function maxConcurrent(): int
+    {
+        return $this->maxConcurrent;
+    }
+
+    /**
+     * @return array{non-empty-string|null, Duration} acquired token (null when full)
+     *                                                and total time spent waiting
+     */
+    private function acquire(): array
     {
         $waited = Duration::zero();
 
@@ -111,17 +137,29 @@ final readonly class SharedBulkhead implements Bulkhead
             );
 
             if ($token !== null) {
-                return $token;
+                return [$token, $waited];
             }
 
             $remaining = $this->maxWait->minus($waited);
             if ($remaining->isZero()) {
-                return null;
+                return [null, $waited];
             }
 
-            $sleep = $remaining->isLessThan($this->pollInterval) ? $remaining : $this->pollInterval;
+            $sleep = Duration::min($remaining, $this->jitteredPollInterval());
             $this->sleeper->sleep($sleep);
             $waited = $waited->plus($sleep);
         }
+    }
+
+    private function jitteredPollInterval(): Duration
+    {
+        if ($this->pollJitter === 0.0) {
+            return $this->pollInterval;
+        }
+
+        $micros = $this->pollInterval->toMicros();
+        $maxDelta = (int) ((float) $micros * $this->pollJitter);
+
+        return Duration::micros(max(1, $micros + random_int(-$maxDelta, $maxDelta)));
     }
 }

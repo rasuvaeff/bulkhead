@@ -38,7 +38,16 @@
     //    reachable without faking the extension;
     //  - ApcuBulkheadStore::isAvailable `&&` -> `||`: only distinguishable when
     //    ext-apcu is loaded but apc.enable_cli is off, a CLI-disabled-but-loaded
-    //    state the test environments don't construct.
+    //    state the test environments don't construct;
+    //  - SharedBulkhead::jitteredPollInterval ReturnRemoval on the jitter==0 early
+    //    return: the fall-through computes maxDelta=0 and returns an identical
+    //    interval — performance-only;
+    //  - SharedBulkhead::jitteredPollInterval CastFloat on `(float) $micros`: the
+    //    cast exists only to satisfy psalm's strict binary operands; int*float
+    //    promotes identically without it;
+    //  - SharedBulkhead::jitteredPollInterval Plus -> Minus around
+    //    `random_int(-$maxDelta, $maxDelta)`: the jitter distribution is symmetric,
+    //    so +delta and -delta are provably the same distribution.
     "testFramework": "testo",
     "minMsi": 86,
     "mutators": {

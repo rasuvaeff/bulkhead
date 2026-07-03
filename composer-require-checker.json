@@ -4,7 +4,10 @@
         "apcu_delete",
         "apcu_enabled",
         "apcu_fetch",
-        "apcu_store"
+        "apcu_store",
+        "Predis\\ClientInterface",
+        "Predis\\Response\\ServerException",
+        "Redis"
     ],
     "php-core-extensions": [
         "Core",

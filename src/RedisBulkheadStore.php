@@ -28,7 +28,11 @@ final readonly class RedisBulkheadStore implements BulkheadStore
         redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
         if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[1]) then
             redis.call('ZADD', KEYS[1], now_ms + tonumber(ARGV[2]), ARGV[3])
-            redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+            -- Never shrink the key TTL: a shorter lease on the same name must not
+            -- expire the whole set while longer-lease members are still live.
+            if tonumber(redis.call('PTTL', KEYS[1])) < tonumber(ARGV[2]) then
+                redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+            end
             return 1
         end
         return 0

@@ -24,7 +24,6 @@
     },
     "require": {
         "php": "8.3 - 8.5",
-        "predis/predis": "^2.2",
         "rasuvaeff/duration": "^1.0"
     },
     "require-dev": {
@@ -32,6 +31,7 @@
         "friendsofphp/php-cs-fixer": "^3.95",
         "infection/infection": "^0.33",
         "maglnet/composer-require-checker": "^4.17",
+        "predis/predis": "^2.2",
         "rasuvaeff/property-testing": "^2.0",
         "rector/rector": "^2.4",
         "roave/backward-compatibility-check": "^8.0",
@@ -40,7 +40,9 @@
         "vimeo/psalm": "^6.16"
     },
     "suggest": {
-        "ext-apcu": "Required to use ApcuBulkheadStore for single-host concurrency limiting"
+        "ext-apcu": "Required to use ApcuBulkheadStore for single-host concurrency limiting",
+        "ext-redis": "Required to use RedisBulkheadStore via PhpRedisScriptRunner",
+        "predis/predis": "Required to use RedisBulkheadStore via PredisScriptRunner (^2.2, pure-PHP alternative to ext-redis)"
     },
     "autoload": {
         "psr-4": {

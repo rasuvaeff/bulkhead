@@ -55,7 +55,7 @@ final class RedisBulkheadIntegrationTest
         Assert::true($first !== null);
         Assert::true($second !== null);
         Assert::null($third);
-        Assert::same(strlen((string) $first), 32);
+        Assert::same(strlen($first), 32);
         Assert::same($this->store->activeCount(self::NAME), 2);
     }
 
@@ -121,5 +121,32 @@ final class RedisBulkheadIntegrationTest
 
         Assert::same($this->store->activeCount(self::NAME), 0);
         Assert::true($this->store->tryAcquire(self::NAME, 1, $shortLease) !== null);
+    }
+
+    public function shorterLeaseDoesNotExpireLongerLeasedSlots(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        Assert::true($this->store->tryAcquire(self::NAME, 2, Duration::seconds(30)) !== null);
+        Assert::true($this->store->tryAcquire(self::NAME, 2, Duration::millis(100)) !== null);
+
+        usleep(200_000);
+
+        // The 100ms slot expired; the 30s one must survive the shorter lease's
+        // key TTL instead of vanishing with the whole set.
+        Assert::same($this->store->activeCount(self::NAME), 1);
+    }
+
+    public function acquireSurvivesAFlushedScriptCache(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        $this->client->script('FLUSH');
+
+        Assert::true($this->store->tryAcquire(self::NAME, 1, Duration::seconds(30)) !== null);
     }
 }

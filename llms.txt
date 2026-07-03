@@ -10,28 +10,36 @@ Install:
 composer require rasuvaeff/bulkhead
 ```
 
-Runtime deps: `rasuvaeff/duration`, `predis/predis` ^2.2 (pure-PHP), a reachable
-Redis server for `RedisBulkheadStore` (multi-host). `ext-apcu` for
-`ApcuBulkheadStore` (single-host) — `suggest`-only, not a hard dependency.
+Runtime deps: `rasuvaeff/duration`. For `RedisBulkheadStore` (multi-host) also
+install ONE Redis client — `predis/predis` ^2.2 (pure-PHP, `PredisScriptRunner`)
+or `ext-redis` (`PhpRedisScriptRunner`); both are optional (`suggest`), not hard
+dependencies. `ext-apcu` for `ApcuBulkheadStore` (single-host) — also optional.
 Namespace `Rasuvaeff\Bulkhead`.
 
 ## Rules
 
 - PHP 8.3+, `declare(strict_types=1)`, immutable `final readonly` classes.
 - `lease` MUST exceed the longest expected callback runtime, or the slot is
-  reclaimed mid-call and concurrency exceeds `maxConcurrent`.
+  reclaimed mid-call and concurrency exceeds `maxConcurrent`. Rule of thumb:
+  downstream timeout + margin.
 - `maxWait` = `Duration::zero()` means fast-fail; otherwise the call polls up to
   `maxWait` (approximate, poll-based bound; default 50ms granularity).
+- `pollJitter` (0.0..1.0, default 0.0) randomizes each poll sleep within
+  ±(pollJitter × pollInterval) so waiters don't stampede a freed slot in lockstep.
+- Waiting is NOT FIFO — under sustained overload a waiter can starve and be
+  rejected while later arrivals get through.
 - `name` must match `/^[A-Za-z0-9_.:-]+$/` (it becomes part of the Redis/APCu key).
 - `InMemoryBulkheadStore` is single-process only (tests/CLI) — not a pool limiter.
 - `ApcuBulkheadStore` only coordinates workers on the same host (APCu shared
   memory doesn't span machines) — use `RedisBulkheadStore` across hosts.
+- `availableSlots()`/`activeCount()` on Redis WRITE (they prune expired members);
+  don't point the store at a read-only replica.
 - Redis acquire is atomic via one Lua script (prune expired -> check ZCARD <
-  max -> ZADD). APCu has no server-side scripting, so `ApcuBulkheadStore` gets
-  the same atomicity from a short-lived `apcu_add` spinlock around the
-  read-check-write.
-- Implement `BulkheadScriptRunner` to back the Redis store with phpredis
-  instead of predis.
+  max -> ZADD; the key TTL never shrinks). Scripts go over EVALSHA with an EVAL
+  fallback on NOSCRIPT. APCu has no server-side scripting, so `ApcuBulkheadStore`
+  gets the same atomicity from a short-lived `apcu_add` spinlock around the
+  read-check-write (spin budget configurable via `lockMaxAttempts`/`lockRetryMicros`).
+- Implement `BulkheadScriptRunner` to back the Redis store with another client.
 
 ## API
 
@@ -49,7 +57,9 @@ $bulkhead = new SharedBulkhead(
     store: new RedisBulkheadStore(new PredisScriptRunner(new Client(['host' => '127.0.0.1']))),
     lease: Duration::seconds(5),
     maxWait: Duration::millis(200),         // Duration::zero() = fast-fail
-    // optional: pollInterval, sleeper, onAccepted, onRejected (Closure(string $name): void)
+    // optional: pollInterval (Duration, default 50ms), pollJitter (float 0..1),
+    // sleeper (SleeperInterface), onAccepted / onRejected
+    // (Closure(string $name, Duration $waited): void)
 );
 
 try {
@@ -59,6 +69,18 @@ try {
 }
 
 $bulkhead->availableSlots(); // int >= 0
+$bulkhead->name();           // non-empty-string
+$bulkhead->maxConcurrent();  // positive-int
+```
+
+With `ext-redis` instead of predis:
+
+```php
+use Rasuvaeff\Bulkhead\Redis\PhpRedisScriptRunner;
+
+$redis = new \Redis();
+$redis->connect('127.0.0.1');
+$store = new RedisBulkheadStore(new PhpRedisScriptRunner($redis));
 ```
 
 Single-host, no Redis:

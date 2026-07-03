@@ -25,14 +25,19 @@ try) — a bulkhead decides *how many at once*.
 
 - PHP 8.3+
 - [`rasuvaeff/duration`](https://github.com/rasuvaeff/duration) for the typed lease/wait values
-- [`predis/predis`](https://github.com/predis/predis) ^2.2 (pure-PHP Redis client; no extension required)
-- A reachable Redis server for multi-host cross-process limiting (`RedisBulkheadStore`)
+- For multi-host cross-process limiting (`RedisBulkheadStore`): a reachable Redis
+  server plus **one** Redis client — [`predis/predis`](https://github.com/predis/predis)
+  ^2.2 (pure-PHP, `PredisScriptRunner`) or `ext-redis` (`PhpRedisScriptRunner`).
+  Both are optional dependencies; install the one you use.
 - `ext-apcu` for single-host cross-process limiting (`ApcuBulkheadStore`) — optional, not a hard dependency
 
 ## Installation
 
 ```bash
 composer require rasuvaeff/bulkhead
+
+# for RedisBulkheadStore with the pure-PHP client:
+composer require predis/predis
 ```
 
 ## Usage
@@ -60,20 +65,66 @@ try {
 }
 ```
 
+With `ext-redis` instead of predis:
+
+```php
+use Rasuvaeff\Bulkhead\Redis\PhpRedisScriptRunner;
+
+$redis = new \Redis();
+$redis->connect('127.0.0.1');
+$store = new RedisBulkheadStore(new PhpRedisScriptRunner($redis));
+```
+
+Optional knobs:
+
+```php
+$bulkhead = new SharedBulkhead(
+    name: 'legacy-api',
+    maxConcurrent: 10,
+    store: $store,
+    lease: Duration::seconds(5),
+    maxWait: Duration::millis(200),
+    pollInterval: Duration::millis(50), // polling granularity while waiting
+    pollJitter: 0.5,                    // randomize each poll sleep ±50% so waiters
+                                        // don't stampede a freed slot in lockstep
+    onAccepted: static fn(string $name, Duration $waited) => $metrics->timing("bulkhead.$name.wait", $waited->toMillis()),
+    onRejected: static fn(string $name, Duration $waited) => $metrics->increment("bulkhead.$name.rejected"),
+);
+```
+
 ### Public API
 
 | Type | Description |
 |---|---|
 | `Bulkhead` | Interface: `call(callable): mixed`, `availableSlots(): int` |
-| `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait` |
+| `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait`; exposes `name()`, `maxConcurrent()` |
 | `BulkheadStore` | Backing store: `tryAcquire`, `release`, `activeCount` |
 | `RedisBulkheadStore` | Multi-host cross-process store; sorted-set + Lua, atomic acquire, lease TTL |
 | `ApcuBulkheadStore` | Single-host cross-process store; APCu spinlock, atomic acquire, lease TTL |
 | `InMemoryBulkheadStore` | Single-process store (tests / CLI); does not coordinate across processes |
-| `BulkheadScriptRunner` | Typed seam over a Redis script call (implement for phpredis) |
-| `Redis\PredisScriptRunner` | predis-backed `BulkheadScriptRunner` |
-| `BulkheadFullException` | Thrown when no slot is available within `maxWait` |
+| `BulkheadScriptRunner` | Typed seam over a Redis script call (implement for another client) |
+| `Redis\PredisScriptRunner` | predis-backed `BulkheadScriptRunner`; EVALSHA with EVAL fallback |
+| `Redis\PhpRedisScriptRunner` | `ext-redis`-backed `BulkheadScriptRunner`; EVALSHA with EVAL fallback |
+| `BulkheadFullException` | Thrown when no slot is available within `maxWait`; carries `name`, `maxConcurrent` |
 | `Sleeper\SleeperInterface` | Wait strategy while polling; `SystemSleeper`, `FakeSleeper` |
+
+### Sizing the knobs
+
+- **`maxConcurrent`** — what the *downstream* tolerates, not what the pool can
+  send. If the dependency handles ~10 concurrent connections comfortably and you
+  run 3 app hosts sharing one Redis, `maxConcurrent: 10` caps all hosts
+  together. It must be smaller than your FPM worker count to mean anything —
+  with 50 workers and `maxConcurrent: 100` the bulkhead never engages.
+- **`lease`** — strictly greater than the worst-case callback runtime, in
+  practice: downstream timeout + a safety margin. Too short and slots are
+  reclaimed mid-call (limit overshoots); too long and a crashed worker's slot
+  stays occupied for the whole lease (limit undershoots). If the callback is an
+  HTTP call with a 5s timeout, `lease: Duration::seconds(10)` is a sane start.
+- **`maxWait`** — how long a request may queue for a slot. `Duration::zero()`
+  fast-fails (shed load immediately); anything longer trades latency for a
+  lower rejection rate. Keep it well under your own request timeout.
+- **`pollJitter`** — set it to `0.1`–`0.5` when many workers may wait at once,
+  so a freed slot isn't stampeded by every waiter on the same 50ms tick.
 
 ### How the limit holds across workers
 
@@ -108,10 +159,24 @@ doesn't span machines; use `RedisBulkheadStore` for a pool spread across hosts.
 - `maxWait` is an approximate, poll-based bound (default 50ms granularity): the
   per-attempt store round-trip is not counted, so real wall time can slightly
   exceed it.
+- **Waiting is not FIFO.** Waiters poll; whoever polls right after a release
+  wins the slot. Under sustained overload a waiter can starve past `maxWait`
+  and be rejected while later arrivals get through.
+- `availableSlots()` / `activeCount()` on Redis **write** (they prune expired
+  members), so they can't be pointed at a read-only replica.
 - `InMemoryBulkheadStore` is single-process only — it does **not** limit the FPM
   pool. Use it for tests and CLI tools.
 - `ApcuBulkheadStore` only limits workers on the **same machine**. A pool spread
-  across multiple hosts needs `RedisBulkheadStore`.
+  across multiple hosts needs `RedisBulkheadStore`. Two sharp edges of the APCu
+  spinlock:
+  - `tryAcquire`/`release` spin up to ~100ms (configurable via
+    `lockMaxAttempts`/`lockRetryMicros`) for the internal lock. A failed
+    `tryAcquire` spin reports "full"; a failed `release` spin leaves the slot to
+    expire with its lease.
+  - APCu has no compare-and-delete, so `unlock` can't verify ownership: a holder
+    stalled past the 1s lock TTL inside the microsecond-sized critical section
+    could delete a successor's lock. Accepted as negligible for a critical
+    section this small; use Redis if that guarantee matters to you.
 
 ## Examples
 
@@ -134,14 +199,16 @@ docker run --rm -v "$PWD":/app -w /app composer:2 composer cs:fix
 docker run --rm -v "$PWD":/app -w /app composer:2 composer test
 ```
 
-Integration tests need a Redis server (self-skip unless `REDIS_HOST` is set)
-and `ext-apcu` (self-skip via `ApcuBulkheadStore::isAvailable()`); the base
-`composer:2` image has neither, so build a PHP image with both first:
+Integration tests need a Redis server (self-skip unless `REDIS_HOST` is set),
+`ext-apcu` (self-skip via `ApcuBulkheadStore::isAvailable()`) and `ext-redis`
+(self-skip via `extension_loaded('redis')`); the base `composer:2` image has
+none of them, so run the suite in an image carrying `apcu`, `pcntl` and `redis`
+(plus `apc.enable_cli=1`):
 
 ```bash
 docker run -d --name bh-redis -p 6379:6379 redis:7-alpine
 docker run --rm --network host -v "$PWD":/app -w /app -e REDIS_HOST=127.0.0.1 \
-  composer:2 vendor/bin/testo --suite=Integration
+  <php-image-with-apcu-pcntl-redis> vendor/bin/testo --suite=Integration
 docker rm -f bh-redis
 ```
 
