@@ -26,16 +26,23 @@ final readonly class PredisScriptRunner implements BulkheadScriptRunner
     #[\Override]
     public function run(string $script, string $key, array $args): int
     {
+        // createCommand/executeCommand are real ClientInterface methods; the
+        // magic eval()/evalsha() @method annotations are not resolvable by
+        // psalm across every supported predis release.
         try {
             /** @var mixed $reply */
-            $reply = $this->client->evalsha(sha1($script), 1, $key, ...$args);
+            $reply = $this->client->executeCommand(
+                $this->client->createCommand('EVALSHA', [sha1($script), 1, $key, ...$args]),
+            );
         } catch (ServerException $e) {
             if ($e->getErrorType() !== 'NOSCRIPT') {
                 throw $e;
             }
 
             /** @var mixed $reply */
-            $reply = $this->client->eval($script, 1, $key, ...$args);
+            $reply = $this->client->executeCommand(
+                $this->client->createCommand('EVAL', [$script, 1, $key, ...$args]),
+            );
         }
 
         return (int) $reply;

@@ -19,9 +19,12 @@ Lua, atomic acquire, multi-host; client-agnostic via `BulkheadScriptRunner` —
 1. **Verification is mandatory.** Never claim "done" without a fresh green
    `composer build`. "Should work" does not count.
 2. **No suppressions.** No `@psalm-suppress`, no baseline. Fix the root cause.
-   (The untyped Redis-client boundaries — predis `__call`, phpredis `mixed`
-   replies — are isolated to `Redis\PredisScriptRunner`/`Redis\PhpRedisScriptRunner`,
-   which cast the `mixed` reply once.)
+   (The untyped Redis-client boundaries are isolated to
+   `Redis\PredisScriptRunner`/`Redis\PhpRedisScriptRunner`, which cast the
+   `mixed` reply once. PredisScriptRunner must go through
+   `createCommand()`/`executeCommand()` — NOT the magic `eval()`/`evalsha()`
+   `@method`s, which psalm cannot resolve on every predis release the
+   prefer-lowest job installs.)
 3. **`lease` must outlive the work it protects, and acquire must stay atomic.**
    The lease TTL is what reclaims a dead worker's slot; if a callback can run
    longer than its lease, the slot is reclaimed mid-call and concurrency exceeds
