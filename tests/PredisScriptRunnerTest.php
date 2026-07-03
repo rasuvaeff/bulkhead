@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Rasuvaeff\Bulkhead\Tests;
 
 use Predis\ClientInterface;
+use Predis\Command\CommandInterface;
+use Predis\Command\RawCommand;
 use Predis\Response\ServerException;
 use Rasuvaeff\Bulkhead\Redis\PredisScriptRunner;
 use Testo\Assert;
@@ -25,7 +27,7 @@ final class PredisScriptRunnerTest
 
         Assert::same($result, 1);
         Assert::same(count($client->calls), 1);
-        Assert::same($client->calls[0], ['evalsha', [sha1('return 1'), 1, 'bulkhead:svc', 2, 5000]]);
+        Assert::same($client->calls[0], ['EVALSHA', [sha1('return 1'), 1, 'bulkhead:svc', 2, 5000]]);
     }
 
     public function fallsBackToEvalWhenScriptNotCached(): void
@@ -37,8 +39,8 @@ final class PredisScriptRunnerTest
 
         Assert::same($result, 1);
         Assert::same(count($client->calls), 2);
-        Assert::same($client->calls[0][0], 'evalsha');
-        Assert::same($client->calls[1], ['eval', ['return 1', 1, 'bulkhead:svc', 2]]);
+        Assert::same($client->calls[0][0], 'EVALSHA');
+        Assert::same($client->calls[1], ['EVAL', ['return 1', 1, 'bulkhead:svc', 2]]);
     }
 
     public function rethrowsNonNoscriptServerErrors(): void
@@ -74,15 +76,9 @@ final class PredisScriptRunnerTest
             ) {}
 
             #[\Override]
-            public function __call($method, $arguments): mixed
+            public function __call($method, $arguments): never
             {
-                $this->calls[] = [(string) $method, (array) $arguments];
-
-                if ($method === 'evalsha' && $this->evalshaError !== null) {
-                    throw new ServerException($this->evalshaError);
-                }
-
-                return $this->reply;
+                throw new \LogicException('Not used');
             }
 
             #[\Override]
@@ -116,15 +112,21 @@ final class PredisScriptRunnerTest
             }
 
             #[\Override]
-            public function createCommand($method, $arguments = []): never
+            public function createCommand($method, $arguments = []): CommandInterface
             {
-                throw new \LogicException('Not used');
+                return new RawCommand((string) $method, (array) $arguments);
             }
 
             #[\Override]
-            public function executeCommand($command): never
+            public function executeCommand($command): mixed
             {
-                throw new \LogicException('Not used');
+                $this->calls[] = [strtoupper($command->getId()), $command->getArguments()];
+
+                if ($command->getId() === 'EVALSHA' && $this->evalshaError !== null) {
+                    throw new ServerException($this->evalshaError);
+                }
+
+                return $this->reply;
             }
         };
     }
