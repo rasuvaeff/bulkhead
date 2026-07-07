@@ -5,10 +5,15 @@ declare(strict_types=1);
 namespace Rasuvaeff\Bulkhead\Tests;
 
 use Rasuvaeff\Bulkhead\InMemoryBulkheadStore;
+use Rasuvaeff\Bulkhead\Tests\Support\AcquireCommand;
+use Rasuvaeff\Bulkhead\Tests\Support\BulkheadHarness;
+use Rasuvaeff\Bulkhead\Tests\Support\ReleaseCommand;
 use Rasuvaeff\Duration\Duration;
 use Rasuvaeff\PropertyTesting\ArbitraryInterface;
 use Rasuvaeff\PropertyTesting\Gen;
 use Rasuvaeff\PropertyTesting\Property;
+use Rasuvaeff\PropertyTesting\StateMachine\CommandSequence;
+use Rasuvaeff\PropertyTesting\StateMachine\StateMachine;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Lifecycle\BeforeTest;
@@ -141,5 +146,35 @@ final class InMemoryBulkheadStoreTest
     private function releasingEveryTokenRestoresFullCapacityGenerators(): array
     {
         return ['max' => Gen::intBetween(1, 30)];
+    }
+
+    /**
+     * Model-based test: any interleaving of acquire and release stays in step
+     * with a simplified model (a held-slot count), so `activeCount` never leaves
+     * `[0, max]` and matches the count implied by the operations — coverage the
+     * single-shot properties above (acquire-only, acquire-all-then-release-all)
+     * never reach.
+     */
+    #[Property(runs: 300)]
+    public function interleavedAcquireAndReleaseTrackTheModel(CommandSequence $sequence): void
+    {
+        $harness = new BulkheadHarness(3);
+
+        // check() throws PostconditionViolation the moment a command disagrees
+        // with the model; reaching the final assertion means every step matched.
+        StateMachine::check($sequence, static fn(): BulkheadHarness => $harness);
+
+        Assert::true($harness->activeCount() >= 0 && $harness->activeCount() <= 3);
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    private function interleavedAcquireAndReleaseTrackTheModelGenerators(): array
+    {
+        $max = 3;
+
+        return ['sequence' => Gen::commands(0, [
+            Gen::constant(new AcquireCommand($max)),
+            Gen::map(Gen::intBetween(0, $max - 1), static fn(int $index): ReleaseCommand => new ReleaseCommand($index)),
+        ])];
     }
 }
