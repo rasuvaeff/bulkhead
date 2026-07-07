@@ -32,7 +32,7 @@
         "infection/infection": "^0.33",
         "maglnet/composer-require-checker": "^4.17",
         "predis/predis": "^2.2 || ^3.0",
-        "rasuvaeff/property-testing": "^2.0",
+        "rasuvaeff/property-testing": "^2.2",
         "rector/rector": "^2.4",
         "roave/backward-compatibility-check": "^8.0",
         "testo/bridge-infection": "^0.1.6",
