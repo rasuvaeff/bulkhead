@@ -113,7 +113,7 @@ final class InMemoryBulkheadStoreTest
     }
 
     /** @return array<string, ArbitraryInterface> */
-    private function neverGrantsMoreThanMaxConcurrentGenerators(): array
+    public static function neverGrantsMoreThanMaxConcurrentGenerators(): array
     {
         return [
             'max' => Gen::intBetween(1, 20),
@@ -143,7 +143,7 @@ final class InMemoryBulkheadStoreTest
     }
 
     /** @return array<string, ArbitraryInterface> */
-    private function releasingEveryTokenRestoresFullCapacityGenerators(): array
+    public static function releasingEveryTokenRestoresFullCapacityGenerators(): array
     {
         return ['max' => Gen::intBetween(1, 30)];
     }
@@ -168,7 +168,7 @@ final class InMemoryBulkheadStoreTest
     }
 
     /** @return array<string, ArbitraryInterface> */
-    private function interleavedAcquireAndReleaseTrackTheModelGenerators(): array
+    public static function interleavedAcquireAndReleaseTrackTheModelGenerators(): array
     {
         $max = 3;
 

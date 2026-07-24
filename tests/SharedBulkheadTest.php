@@ -456,7 +456,7 @@ final class SharedBulkheadTest
     }
 
     /** @return array<string, ArbitraryInterface> */
-    private function waitBudgetNeverExceedsMaxWaitGenerators(): array
+    public static function waitBudgetNeverExceedsMaxWaitGenerators(): array
     {
         return [
             'maxWaitMillis' => Gen::intBetween(0, 2000),
