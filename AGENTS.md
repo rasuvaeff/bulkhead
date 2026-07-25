@@ -99,7 +99,7 @@ a `redis:7-alpine` service container + `REDIS_HOST`, plus `apcu`/`pcntl`/`redis`
   is fast-fail. The wait loop accumulates `Sleeper` time and clamps the last
   sleep with `Duration::minus` (saturating), so the budget is bounded but
   approximate (per-attempt Redis latency is not counted).
-- `name` is validated (`/^[A-Za-z0-9_.:-]+$/`) because it becomes a Redis/APCu key.
+- `name` is validated (`/^[A-Za-z0-9_.:-]+\z/`) because it becomes a Redis/APCu key.
 - `pollJitter` (0.0..1.0) randomizes each poll sleep within ±(jitter × pollInterval)
   with a **1µs floor** — the `max(1, ...)` in `jitteredPollInterval` is what stops a
   zero-length sleep from spinning the wait loop without consuming budget; don't
