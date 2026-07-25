@@ -221,6 +221,13 @@ final class SharedBulkheadTest
         new SharedBulkhead('bad name', 1, new InMemoryBulkheadStore(), Duration::seconds(5), Duration::zero());
     }
 
+    public function rejectsNameWithTrailingNewline(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Invalid bulkhead name');
+
+        new SharedBulkhead("svc\n", 1, new InMemoryBulkheadStore(), Duration::seconds(5), Duration::zero());
+    }
+
     public function rejectsNonPositiveMaxConcurrent(): void
     {
         Expect::exception(\InvalidArgumentException::class)->withMessageContaining('Max concurrent must be greater than or equal to 1');
