@@ -20,6 +20,8 @@ use Testo\Test;
 
 #[Test]
 #[Covers(SharedBulkhead::class)]
+#[Covers(BulkheadFullException::class)]
+#[Covers(FakeSleeper::class)]
 final class SharedBulkheadTest
 {
     public function runsCallbackAndReturnsItsResult(): void
