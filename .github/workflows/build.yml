@@ -55,8 +55,6 @@ jobs:
 
   build:
     name: PHP ${{ matrix.php }}
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.run == 'true') }}
     runs-on: ubuntu-latest
 
     strategy:
