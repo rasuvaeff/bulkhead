@@ -126,8 +126,17 @@ final class InMemoryBulkheadStoreTest
     {
         $store = new InMemoryBulkheadStore();
 
+        // Capped at $max + 1 attempts on purpose: timeoutMs is checked after the
+        // body returns, so a store that keeps granting would hang an unbounded
+        // loop instead of failing the count assertion below.
         $tokens = [];
-        while (($token = $store->tryAcquire('svc', $max, $this->lease)) !== null) {
+        for ($attempt = 0; $attempt <= $max; ++$attempt) {
+            $token = $store->tryAcquire('svc', $max, $this->lease);
+
+            if ($token === null) {
+                break;
+            }
+
             $tokens[] = $token;
         }
 
