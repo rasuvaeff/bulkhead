@@ -437,7 +437,7 @@ final class SharedBulkheadTest
         );
     }
 
-    #[Property(runs: 150)]
+    #[Property(runs: 150, timeoutMs: 1000)]
     public function waitBudgetNeverExceedsMaxWait(int $maxWaitMillis, int $pollMillis): void
     {
         $sleeper = new FakeSleeper();
