@@ -96,7 +96,7 @@ final class InMemoryBulkheadStoreTest
         Assert::same(strlen((string) $token), 32);
     }
 
-    #[Property(runs: 200)]
+    #[Property(runs: 200, timeoutMs: 1000)]
     public function neverGrantsMoreThanMaxConcurrent(int $max, int $attempts): void
     {
         $store = new InMemoryBulkheadStore();
@@ -121,13 +121,22 @@ final class InMemoryBulkheadStoreTest
         ];
     }
 
-    #[Property(runs: 150)]
+    #[Property(runs: 150, timeoutMs: 1000)]
     public function releasingEveryTokenRestoresFullCapacity(int $max): void
     {
         $store = new InMemoryBulkheadStore();
 
+        // Capped at $max + 1 attempts on purpose: timeoutMs is checked after the
+        // body returns, so a store that keeps granting would hang an unbounded
+        // loop instead of failing the count assertion below.
         $tokens = [];
-        while (($token = $store->tryAcquire('svc', $max, $this->lease)) !== null) {
+        for ($attempt = 0; $attempt <= $max; ++$attempt) {
+            $token = $store->tryAcquire('svc', $max, $this->lease);
+
+            if ($token === null) {
+                break;
+            }
+
             $tokens[] = $token;
         }
 
@@ -155,7 +164,7 @@ final class InMemoryBulkheadStoreTest
      * single-shot properties above (acquire-only, acquire-all-then-release-all)
      * never reach.
      */
-    #[Property(runs: 300)]
+    #[Property(runs: 300, timeoutMs: 1000)]
     public function interleavedAcquireAndReleaseTrackTheModel(CommandSequence $sequence): void
     {
         $harness = new BulkheadHarness(3);
