@@ -437,14 +437,16 @@ final class SharedBulkheadTest
         );
     }
 
-    #[Property(runs: 150)]
+    #[Property(runs: 150, timeoutMs: 1000)]
     public function waitBudgetNeverExceedsMaxWait(int $maxWaitMillis, int $pollMillis): void
     {
         $sleeper = new FakeSleeper();
         $bulkhead = new SharedBulkhead(
             name: 'svc',
             maxConcurrent: 1,
-            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            store: $this->alwaysFullStore(
+                maxPolls: (int) ceil($maxWaitMillis / $pollMillis) + 2,
+            ),
             lease: Duration::seconds(5),
             maxWait: Duration::millis($maxWaitMillis),
             pollInterval: Duration::millis($pollMillis),
@@ -482,6 +484,46 @@ final class SharedBulkheadTest
             lease: Duration::seconds(5),
             maxWait: Duration::zero(),
         );
+    }
+
+    /**
+     * Never grants a token, and throws once polled more often than the wait
+     * budget allows: `timeoutMs` is measured after the property body returns,
+     * so a wait loop that stopped consuming its budget would hang the run
+     * instead of reporting a failure.
+     */
+    private function alwaysFullStore(int $maxPolls): BulkheadStore
+    {
+        return new class ($maxPolls) implements BulkheadStore {
+            private int $polls = 0;
+
+            public function __construct(
+                private readonly int $maxPolls,
+            ) {}
+
+            #[\Override]
+            public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string
+            {
+                ++$this->polls;
+
+                if ($this->polls > $this->maxPolls) {
+                    throw new \RuntimeException(
+                        sprintf('Wait loop polled %d times, past its budget of %d', $this->polls, $this->maxPolls),
+                    );
+                }
+
+                return null;
+            }
+
+            #[\Override]
+            public function release(string $name, string $token): void {}
+
+            #[\Override]
+            public function activeCount(string $name): int
+            {
+                return 0;
+            }
+        };
     }
 
     private function scriptedStore(int $nullsBeforeToken): BulkheadStore
