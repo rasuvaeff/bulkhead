@@ -83,12 +83,22 @@ race for the same slots — a single-process test cannot distinguish a correct
 `apcu_add` compare-and-set from one whose success/failure branches are
 swapped, since the lock key gets set either way. Without the barrier,
 `pcntl_fork()`'s natural stagger between children can exceed the critical
-section's duration and the race window is simply missed (flaky-clean); without
-a hold time comfortably longer than the whole pack's worst-case lock-cycling
-time, legitimate slot reuse over the test's lifetime gets miscounted as a
-violation (flaky-failing). Both failure modes were hit and fixed while writing
-this test — don't shrink the worker count/hold time without re-verifying
-against a hand-mutated `lock()` first.
+section's duration and the race window is simply missed (flaky-clean). The
+assertion measures **peak** concurrency — a shared `apcu_inc` counter raised
+after acquire and lowered *before* release, so its interval nests inside the
+hold and the recorded peak can only undercount, never overcount. Counting
+total acquisitions instead (what this test did until #22) reads legitimate
+slot reuse as a violation the moment the pack cycles through the lock faster
+than the hold time, which is exactly what a CPU-saturated runner produces —
+reproducible as 3/3 red under `docker run --cpus=1` on unmutated code, where
+the peak-based assertion is 5/5 green. Keep the lease (60s) far longer than
+the hold (200ms) for a related reason: a lease expiring mid-hold would let the
+store legitimately reclaim a live worker's slot, over-admitting for real. Don't
+shrink the worker count/hold time, or swap the dec and the release, without
+re-verifying against a hand-mutated `lock()` first. If it ever goes red again,
+the remaining theoretical route on correct code is the class docblock's known
+compromise — a lock holder descheduled past `LOCK_TTL_SECONDS` (1s) loses its
+lock to a successor — not the total-vs-peak miscount, which is closed.
 
 CI runs the Integration suite and mutation in the `coverage` job, which provides
 a `redis:7-alpine` service container + `REDIS_HOST`, plus `apcu`/`pcntl`/`redis`.

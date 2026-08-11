@@ -124,11 +124,21 @@ final class ApcuBulkheadIntegrationTest
      *   the same instant. `pcntl_fork()` itself staggers children by however long
      *   each fork + loop iteration takes; without a barrier that stagger can exceed
      *   the critical section's duration and the race window is simply missed.
-     * - A hold time (200ms) comfortably longer than the whole pack's worst-case time
-     *   to cycle through the lock, so a worker that legitimately released its slot
-     *   isn't double-counted as "another violation" when a later worker reuses it —
-     *   that reuse is correct behavior, not a violation, and previously produced
-     *   false failures on unmutated code at high worker counts with a short hold.
+     * - Measuring **peak** concurrency, not total acquisitions. A worker that
+     *   legitimately released its slot lets a later one reuse it; counting
+     *   acquisitions over the whole run reads that correct behavior as a violation
+     *   as soon as the pack cycles through the lock faster than the hold time —
+     *   which is exactly what a CPU-saturated runner (`infection --threads=max`)
+     *   produces. The shared `apcu_inc` counter is incremented after acquire and
+     *   decremented **before** release, so its interval is contained in the hold
+     *   interval and the recorded peak can only ever undercount true concurrency:
+     *   no correct run can fail. A broken `lock()` still admits several workers at
+     *   once for the whole 200ms hold, so the peak exceeds $max regardless of timing.
+     *
+     * The lease is far longer than the hold for the same reason: a lease that could
+     * expire mid-hold on a saturated runner would let the store legitimately reclaim
+     * a live worker's slot and hand it to another, which is a genuine over-admission
+     * of the test's own making.
      */
     public function neverExceedsMaxConcurrentUnderRealForkContention(): void
     {
@@ -143,6 +153,7 @@ final class ApcuBulkheadIntegrationTest
 
         apcu_store('test-barrier:ready', 0);
         apcu_store('test-barrier:go', 0);
+        apcu_store('test-barrier:concurrent', 0);
 
         $pids = [];
         for ($i = 0; $i < $workers; ++$i) {
@@ -156,10 +167,12 @@ final class ApcuBulkheadIntegrationTest
                     usleep(200);
                 }
 
-                $token = $store->tryAcquire('stress', $max, Duration::seconds(5));
+                $token = $store->tryAcquire('stress', $max, Duration::seconds(60));
                 if ($token !== null) {
-                    file_put_contents($resultFile, "1\n", \FILE_APPEND | \LOCK_EX);
+                    $concurrent = (int) apcu_inc('test-barrier:concurrent');
+                    file_put_contents($resultFile, $concurrent . "\n", \FILE_APPEND | \LOCK_EX);
                     usleep(200_000);
+                    apcu_dec('test-barrier:concurrent');
                     $store->release('stress', $token);
                 }
 
@@ -178,9 +191,15 @@ final class ApcuBulkheadIntegrationTest
             pcntl_waitpid($pid, $status);
         }
 
-        $acquired = substr_count((string) file_get_contents($resultFile), "1\n");
+        $recorded = array_filter(
+            explode("\n", (string) file_get_contents($resultFile)),
+            static fn(string $line): bool => $line !== '',
+        );
         unlink($resultFile);
 
-        Assert::true($acquired <= $max);
+        $peak = $recorded === [] ? 0 : max(array_map(intval(...), $recorded));
+
+        Assert::true($peak >= 1);
+        Assert::true($peak <= $max);
     }
 }

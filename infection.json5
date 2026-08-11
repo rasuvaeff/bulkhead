@@ -57,8 +57,11 @@
             // genuinely breaks mutual exclusion under concurrent contention -
             // verified by hand-mutating the source and running
             // neverExceedsMaxConcurrentUnderRealForkContention (tests/Integration/
-            // ApcuBulkheadIntegrationTest.php): 5/5 passed unmutated, 5/5 failed
-            // mutated. Not equivalent - ignored only because pcov coverage doesn't
+            // ApcuBulkheadIntegrationTest.php): 5/5 passed unmutated (under
+            // `--cpus=1`, the saturation that used to make the old total-based
+            // assertion fail), 5/5 failed mutated, peak concurrency 6-20 against
+            // max 3. Re-verified after the #22 switch from total acquisitions to
+            // peak concurrency. Not equivalent - ignored only because pcov coverage doesn't
             // propagate from pcntl_fork()'d children back to the parent process's
             // report, so infection's coverage-based test selection never picks
             // that test for this mutant and it escapes despite being killed.
