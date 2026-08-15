@@ -79,7 +79,7 @@ final class SharedBulkheadTest
 
         try {
             $bulkhead->call(static fn(): int => 1);
-            Assert::true(false);
+            Assert::true(actual: false);
         } catch (BulkheadFullException $e) {
             Assert::same($e->name, 'svc');
             Assert::same($e->maxConcurrent, 1);
@@ -165,7 +165,7 @@ final class SharedBulkheadTest
 
         try {
             $bulkhead->call(static fn(): int => 1);
-            Assert::true(false);
+            Assert::true(actual: false);
         } catch (BulkheadFullException) {
         }
 
@@ -313,7 +313,7 @@ final class SharedBulkheadTest
 
         try {
             $bulkhead->call(static fn(): int => 1);
-            Assert::true(false);
+            Assert::true(actual: false);
         } catch (BulkheadFullException) {
         }
 
@@ -350,7 +350,7 @@ final class SharedBulkheadTest
 
         try {
             $bulkhead->call(static fn(): int => 1);
-            Assert::true(false);
+            Assert::true(actual: false);
         } catch (BulkheadFullException) {
         }
 
@@ -380,7 +380,7 @@ final class SharedBulkheadTest
 
         try {
             $bulkhead->call(static fn(): int => 1);
-            Assert::true(false);
+            Assert::true(actual: false);
         } catch (BulkheadFullException) {
         }
 
@@ -455,7 +455,7 @@ final class SharedBulkheadTest
 
         try {
             $bulkhead->call(static fn(): int => 1);
-            Assert::true(false);
+            Assert::true(actual: false);
         } catch (BulkheadFullException) {
         }
 

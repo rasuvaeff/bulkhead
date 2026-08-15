@@ -10,6 +10,7 @@ use Rasuvaeff\Bulkhead\Tests\Support\BulkheadHarness;
 use Rasuvaeff\Bulkhead\Tests\Support\ReleaseCommand;
 use Rasuvaeff\Duration\Duration;
 use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Classify;
 use Rasuvaeff\PropertyTesting\Gen;
 use Rasuvaeff\PropertyTesting\Property;
 use Rasuvaeff\PropertyTesting\StateMachine\CommandSequence;
@@ -169,6 +170,24 @@ final class InMemoryBulkheadStoreTest
     {
         $harness = new BulkheadHarness(3);
 
+        $kinds = [];
+
+        foreach ($sequence->commands as $command) {
+            $kinds[$command::class] = true;
+        }
+
+        // Swarming is what makes these shares worth gating: drawing uniformly
+        // from both commands, a sequence that never releases is astronomically
+        // rare, and saturation — every slot held, every further acquire
+        // refused — is precisely where a leased-slot store goes wrong.
+        Classify::cover(
+            isset($kinds[AcquireCommand::class]) && !isset($kinds[ReleaseCommand::class]),
+            'acquire-only, driven to saturation',
+            10.0,
+        );
+        Classify::cover(\count($kinds) === 2, 'both commands interleaved', 15.0);
+        Classify::when($sequence->commands === [], 'subset with no applicable command');
+
         // check() throws PostconditionViolation the moment a command disagrees
         // with the model; reaching the final assertion means every step matched.
         StateMachine::check($sequence, static fn(): BulkheadHarness => $harness);
@@ -181,9 +200,14 @@ final class InMemoryBulkheadStoreTest
     {
         $max = 3;
 
-        return ['sequence' => Gen::commands(0, [
+        // Swarmed: each sequence may use only a subset of the two commands,
+        // drawn afresh per case. Without it every sequence mixes both, and the
+        // bugs that need an operation to be absent stay out of reach.
+        // minLength stays at the default 0, so a subset from which nothing
+        // applies yields an empty sequence rather than GenerationExhausted.
+        return ['sequence' => Gen::swarm(Gen::commands(0, [
             Gen::constant(new AcquireCommand($max)),
             Gen::map(Gen::intBetween(0, $max - 1), static fn(int $index): ReleaseCommand => new ReleaseCommand($index)),
-        ])];
+        ]))];
     }
 }

@@ -18,9 +18,9 @@ final class SystemSleeperTest
     {
         $sleeper = new SystemSleeper();
 
-        $start = hrtime(true);
+        $start = hrtime(as_number: true);
         $sleeper->sleep(Duration::millis(20));
-        $elapsedMicros = (hrtime(true) - $start) / 1000;
+        $elapsedMicros = (hrtime(as_number: true) - $start) / 1000;
 
         Assert::true($elapsedMicros >= 10_000);
     }
@@ -29,9 +29,9 @@ final class SystemSleeperTest
     {
         $sleeper = new SystemSleeper();
 
-        $start = hrtime(true);
+        $start = hrtime(as_number: true);
         $sleeper->sleep(Duration::zero());
-        $elapsedMicros = (hrtime(true) - $start) / 1000;
+        $elapsedMicros = (hrtime(as_number: true) - $start) / 1000;
 
         Assert::true($elapsedMicros < 10_000);
     }
