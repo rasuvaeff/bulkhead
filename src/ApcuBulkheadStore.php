@@ -158,7 +158,7 @@ final readonly class ApcuBulkheadStore implements BulkheadStore
 
     private function nowMs(): int
     {
-        return (int) (microtime(true) * 1_000.0);
+        return (int) (microtime(as_float: true) * 1_000.0);
     }
 
     private function slotsKey(string $name): string

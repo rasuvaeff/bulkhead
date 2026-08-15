@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Rector\CodeQuality\Rector\Identical\FlipTypeControlToUseExclusiveTypeRector;
 use Rector\CodeQuality\Rector\Identical\SimplifyBoolIdenticalTrueRector;
+use Rasuvaeff\RectorNamedLiterals\AddNameToLiteralArgumentRector;
 use Rector\Config\RectorConfig;
 use Rector\DeadCode\Rector\ClassMethod\RemoveEmptyClassMethodRector;
 use Rector\DeadCode\Rector\ClassMethod\RemoveUnusedPrivateMethodRector;
@@ -37,4 +38,5 @@ return RectorConfig::configure()
         // `$x === null` reads clearer than `!$x instanceof FQCN` in test setup
         // guards; keep the null comparison.
         FlipTypeControlToUseExclusiveTypeRector::class,
-    ]);
+    ])
+    ->withRules([AddNameToLiteralArgumentRector::class]);
