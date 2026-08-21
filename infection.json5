@@ -49,7 +49,7 @@
     //    `random_int(-$maxDelta, $maxDelta)`: the jitter distribution is symmetric,
     //    so +delta and -delta are provably the same distribution.
     "testFramework": "testo",
-    "minMsi": 86,
+    "minMsi": 89,
     "mutators": {
         "@default": true,
         "Identical": {
