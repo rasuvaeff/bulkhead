@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.1.3 — 2026-08-21
+
+- Fix a slot leak: the `onAccepted` observer callback ran after acquire but outside the `try/finally` that guarantees `release()`, so a throwing observer (unreachable metrics backend, a `TypeError` in the closure) left the slot occupied — until lease expiry on Redis/APCu, and **permanently** with `InMemoryBulkheadStore` (which ignores the lease). The callback now runs inside the `try`.
+- Document the release-path failure semantics: a `release()` exception masks the callback's exception (reachable via `getPrevious()`, which PHP chains automatically) and loses a successful result — a store exception from `call()` means "outcome unknown", never "did not happen". Pinned by tests.
+- Docs: fix the name-pattern anchor shown in README.md/README.ru.md/llms.txt to the `\z` the code actually uses (`$` matches before a trailing newline); document that `keyPrefix` is trusted configuration (not validated, unlike `name`) and the token trust model (CSPRNG tokens protect against accidents, not adversaries — the trust boundary is Redis access itself).
+
 ## 1.1.2 — 2026-08-21
 
 - Document that the store is a hard dependency: if Redis/APCu is unreachable, `call()` fails closed (throws) rather than admitting the call unboundedly. Callers who only caught `BulkheadFullException` could be surprised by an uncaught `Predis\Connection\ConnectionException` (or equivalent) on a store outage.

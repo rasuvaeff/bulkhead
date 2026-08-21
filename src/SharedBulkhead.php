@@ -88,11 +88,14 @@ final readonly class SharedBulkhead implements Bulkhead
             throw new BulkheadFullException(name: $this->name, maxConcurrent: $this->maxConcurrent);
         }
 
-        if ($this->onAccepted instanceof \Closure) {
-            ($this->onAccepted)($this->name, $waited);
-        }
-
         try {
+            // Inside the try: a throwing observer callback must not leak the
+            // just-acquired slot past release() (with InMemoryBulkheadStore
+            // the lease is ignored, so the leak would be permanent).
+            if ($this->onAccepted instanceof \Closure) {
+                ($this->onAccepted)($this->name, $waited);
+            }
+
             return $callback();
         } finally {
             $this->store->release(name: $this->name, token: $token);

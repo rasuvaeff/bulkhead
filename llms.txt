@@ -28,7 +28,7 @@ Namespace `Rasuvaeff\Bulkhead`.
   ±(pollJitter × pollInterval) so waiters don't stampede a freed slot in lockstep.
 - Waiting is NOT FIFO — under sustained overload a waiter can starve and be
   rejected while later arrivals get through.
-- `name` must match `/^[A-Za-z0-9_.:-]+$/` (it becomes part of the Redis/APCu key).
+- `name` must match `/^[A-Za-z0-9_.:-]+\z/` (it becomes part of the Redis/APCu key).
 - `InMemoryBulkheadStore` is single-process only (tests/CLI) — not a pool limiter.
 - `ApcuBulkheadStore` only coordinates workers on the same host (APCu shared
   memory doesn't span machines) — use `RedisBulkheadStore` across hosts.
@@ -38,6 +38,12 @@ Namespace `Rasuvaeff\Bulkhead`.
   your client / `\RuntimeException` from `PhpRedisScriptRunner`), not
   `BulkheadFullException` — catch both if you need to distinguish "full" from
   "store unreachable".
+- A store failure during `release()` masks the callback's outcome: the
+  callback's exception is only reachable via `getPrevious()`, and a
+  successful result is lost. Treat a store exception from `call()` as
+  "outcome unknown", never "did not happen" (the slot returns via its lease).
+- `keyPrefix` is trusted configuration (not validated, unlike `name`) — never
+  pass untrusted input as the prefix.
 - `availableSlots()`/`activeCount()` on Redis WRITE (they prune expired members);
   don't point the store at a read-only replica.
 - Redis acquire is atomic via one Lua script (prune expired -> check ZCARD <

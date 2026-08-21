@@ -129,6 +129,114 @@ final class SharedBulkheadTest
         Assert::same($accepted, 'svc');
     }
 
+    /**
+     * The observer callback runs inside the try: if it throws, the
+     * just-acquired slot must still be released - with InMemoryBulkheadStore
+     * the lease is ignored, so a leak here would be permanent.
+     */
+    public function throwingOnAcceptedDoesNotLeakTheSlot(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            onAccepted: static function (string $name, Duration $waited): void {
+                throw new \RuntimeException('metrics backend down');
+            },
+        );
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+        } catch (\RuntimeException $e) {
+            Assert::same($e->getMessage(), 'metrics backend down');
+        }
+
+        Assert::same($bulkhead->availableSlots(), 1);
+    }
+
+    /**
+     * PHP semantics pin: an exception thrown by release() in the finally
+     * replaces the callback's in-flight exception, which PHP automatically
+     * chains as its previous. A consumer catching the callback's type misses,
+     * but the original stays reachable - this is the documented contract.
+     */
+    public function releaseFailureMasksCallbackExceptionButChainsIt(): void
+    {
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->releaseThrowingStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+        );
+        $caught = null;
+
+        try {
+            $bulkhead->call(static fn(): int => throw new \DomainException('downstream 503'));
+        } catch (\Throwable $e) {
+            $caught = $e;
+        }
+
+        Assert::instanceOf($caught, \RuntimeException::class);
+        Assert::same($caught->getMessage(), 'store gone');
+        Assert::instanceOf($caught->getPrevious(), \DomainException::class);
+        Assert::same($caught->getPrevious()?->getMessage(), 'downstream 503');
+    }
+
+    /**
+     * Documented contract: when the callback SUCCEEDED and release() then
+     * fails, the release exception surfaces and the result is lost - the
+     * slot returns via its lease. Callers of non-idempotent work must treat
+     * a store exception as "outcome unknown", not "did not happen".
+     */
+    public function releaseFailureAfterSuccessfulCallbackSurfacesTheStoreException(): void
+    {
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->releaseThrowingStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+        );
+        $caught = null;
+
+        try {
+            $bulkhead->call(static fn(): string => 'committed');
+        } catch (\Throwable $e) {
+            $caught = $e;
+        }
+
+        Assert::instanceOf($caught, \RuntimeException::class);
+        Assert::same($caught->getMessage(), 'store gone');
+        Assert::null($caught->getPrevious());
+    }
+
+    private function releaseThrowingStore(): BulkheadStore
+    {
+        return new class implements BulkheadStore {
+            #[\Override]
+            public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string
+            {
+                return 'token-1';
+            }
+
+            #[\Override]
+            public function release(string $name, string $token): void
+            {
+                throw new \RuntimeException('store gone');
+            }
+
+            #[\Override]
+            public function activeCount(string $name): int
+            {
+                return 0;
+            }
+        };
+    }
+
     public function waitsThenAcquiresWhenSlotFreesDuringPolling(): void
     {
         $store = $this->scriptedStore(nullsBeforeToken: 2);
