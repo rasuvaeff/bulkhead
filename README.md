@@ -147,7 +147,7 @@ doesn't span machines; use `RedisBulkheadStore` for a pool spread across hosts.
 
 ## Security
 
-- `name` is validated against `/^[A-Za-z0-9_.:-]+$/` and becomes part of the
+- `name` is validated against `/^[A-Za-z0-9_.:-]+\z/` and becomes part of the
   Redis/APCu key — untrusted names are rejected, not interpolated blindly.
 - Values flow into the Lua script as bound `ARGV`, never string-concatenated.
 - The package opens no network connections itself; you supply the Redis client.
@@ -160,6 +160,24 @@ doesn't span machines; use `RedisBulkheadStore` for a pool spread across hosts.
   `PhpRedisScriptRunner`), uncaught by the package. If you only `catch
   (BulkheadFullException)`, an outage of the store itself will propagate past
   that catch block.
+- **A store failure on the release path masks the callback's outcome.** If
+  the callback threw and `release()` then also throws, the release exception
+  surfaces and the callback's exception is only reachable via
+  `getPrevious()` (PHP chains it automatically) — a `catch` on the
+  callback's type misses. If the callback **succeeded** and `release()`
+  throws, the result is lost: the work was done, but the caller sees the
+  store exception. Treat a store exception from `call()` as "outcome
+  unknown", never "did not happen" — critical for non-idempotent work. The
+  slot itself is safe either way: the lease reclaims it.
+- **`keyPrefix` is trusted configuration.** Unlike `name`, the store key
+  prefix is not validated — passing untrusted input as the prefix lets it
+  target arbitrary existing keys of the same store. Keep it a literal in
+  your config.
+- Slot tokens are 128-bit CSPRNG (`random_bytes(16)`) — unguessable — but
+  `release()` is authenticated by nothing else, and any co-tenant with
+  access to the same Redis can `ZREM`/`DEL` directly. The trust boundary is
+  Redis access itself; the token protects against accidents, not
+  adversaries.
 
 ## Caveats
 
