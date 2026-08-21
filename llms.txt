@@ -32,6 +32,12 @@ Namespace `Rasuvaeff\Bulkhead`.
 - `InMemoryBulkheadStore` is single-process only (tests/CLI) — not a pool limiter.
 - `ApcuBulkheadStore` only coordinates workers on the same host (APCu shared
   memory doesn't span machines) — use `RedisBulkheadStore` across hosts.
+- The store is a hard dependency: if it's unreachable, `call()` fails closed
+  (throws), it does not admit the call unboundedly. A Redis connection failure
+  surfaces as `Predis\Connection\ConnectionException` (or the equivalent from
+  your client / `\RuntimeException` from `PhpRedisScriptRunner`), not
+  `BulkheadFullException` — catch both if you need to distinguish "full" from
+  "store unreachable".
 - `availableSlots()`/`activeCount()` on Redis WRITE (they prune expired members);
   don't point the store at a read-only replica.
 - Redis acquire is atomic via one Lua script (prune expired -> check ZCARD <

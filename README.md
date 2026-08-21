@@ -151,6 +151,15 @@ doesn't span machines; use `RedisBulkheadStore` for a pool spread across hosts.
   Redis/APCu key — untrusted names are rejected, not interpolated blindly.
 - Values flow into the Lua script as bound `ARGV`, never string-concatenated.
 - The package opens no network connections itself; you supply the Redis client.
+- **The store is a hard dependency: unreachable fails closed, not open.** If
+  the configured Redis client can't connect, or the store otherwise errors,
+  `call()` does **not** silently admit the call — it throws. `call()` can
+  therefore throw more than `BulkheadFullException`: a Redis connection
+  failure surfaces as `Predis\Connection\ConnectionException` (or the
+  equivalent from your client / `\RuntimeException` from
+  `PhpRedisScriptRunner`), uncaught by the package. If you only `catch
+  (BulkheadFullException)`, an outage of the store itself will propagate past
+  that catch block.
 
 ## Caveats
 
