@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- Switch the test suite's hand-rolled doubles (anonymous `BulkheadStore` scripted/throwing/poll-budget fakes and the predis `ClientInterface` fake) to `rasuvaeff/understudy` via the `rasuvaeff/understudy-testo` adapter: `scriptedStore(n)` is a `->returns(null × n, 'token')` chain (last link repeats), the poll-budget fake is `->returns(...)->then()->throws()`, an always-full store is a loose double with no stubs, and verification/reset run automatically after each test. Dev-only; no runtime changes.
+
 ## 1.1.3 — 2026-08-21
 
 - Fix a slot leak: the `onAccepted` observer callback ran after acquire but outside the `try/finally` that guarantees `release()`, so a throwing observer (unreachable metrics backend, a `TypeError` in the closure) left the slot occupied — until lease expiry on Redis/APCu, and **permanently** with `InMemoryBulkheadStore` (which ignores the lease). The callback now runs inside the `try`.

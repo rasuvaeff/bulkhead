@@ -13,10 +13,14 @@ use Rasuvaeff\Duration\Duration;
 use Rasuvaeff\PropertyTesting\ArbitraryInterface;
 use Rasuvaeff\PropertyTesting\Gen;
 use Rasuvaeff\PropertyTesting\Property;
+use Rasuvaeff\Understudy\Arg;
+use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Expect;
 use Testo\Test;
+
+use function Rasuvaeff\Understudy\when;
 
 #[Test]
 #[Covers(SharedBulkhead::class)]
@@ -216,25 +220,11 @@ final class SharedBulkheadTest
 
     private function releaseThrowingStore(): BulkheadStore
     {
-        return new class implements BulkheadStore {
-            #[\Override]
-            public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string
-            {
-                return 'token-1';
-            }
+        $store = Understudy::for(BulkheadStore::class);
+        when(fn() => $store->tryAcquire(Arg::any(), Arg::any(), Arg::any()))->returns('token-1');
+        when(fn() => $store->release(Arg::any(), Arg::any()))->throws(new \RuntimeException('store gone'));
 
-            #[\Override]
-            public function release(string $name, string $token): void
-            {
-                throw new \RuntimeException('store gone');
-            }
-
-            #[\Override]
-            public function activeCount(string $name): int
-            {
-                return 0;
-            }
-        };
+        return $store;
     }
 
     public function waitsThenAcquiresWhenSlotFreesDuringPolling(): void
@@ -259,7 +249,7 @@ final class SharedBulkheadTest
 
     public function waitBudgetIsBoundedByMaxWait(): void
     {
-        $store = $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX);
+        $store = $this->neverGrantsStore();
         $sleeper = new FakeSleeper();
         $bulkhead = new SharedBulkhead(
             name: 'svc',
@@ -379,7 +369,7 @@ final class SharedBulkheadTest
         $bulkhead = new SharedBulkhead(
             name: 'svc',
             maxConcurrent: 1,
-            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            store: $this->neverGrantsStore(),
             lease: Duration::seconds(5),
             maxWait: Duration::millis(120),
             pollInterval: Duration::millis(50),
@@ -411,7 +401,7 @@ final class SharedBulkheadTest
         $bulkhead = new SharedBulkhead(
             name: 'svc',
             maxConcurrent: 1,
-            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            store: $this->neverGrantsStore(),
             lease: Duration::seconds(5),
             maxWait: Duration::millis(500),
             pollInterval: Duration::millis(50),
@@ -448,7 +438,7 @@ final class SharedBulkheadTest
         $bulkhead = new SharedBulkhead(
             name: 'svc',
             maxConcurrent: 1,
-            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            store: $this->neverGrantsStore(),
             lease: Duration::seconds(5),
             maxWait: Duration::millis(500),
             pollInterval: Duration::millis(50),
@@ -478,7 +468,7 @@ final class SharedBulkheadTest
         $bulkhead = new SharedBulkhead(
             name: 'svc',
             maxConcurrent: 1,
-            store: $this->scriptedStore(nullsBeforeToken: PHP_INT_MAX),
+            store: $this->neverGrantsStore(),
             lease: Duration::seconds(5),
             maxWait: Duration::micros(50),
             pollInterval: Duration::micros(1),
@@ -598,68 +588,38 @@ final class SharedBulkheadTest
      * Never grants a token, and throws once polled more often than the wait
      * budget allows: `timeoutMs` is measured after the property body returns,
      * so a wait loop that stopped consuming its budget would hang the run
-     * instead of reporting a failure.
+     * instead of reporting a failure. The `->returns(...)->then()->throws()`
+     * chain gives one answer per poll, then keeps throwing — the last link
+     * repeats.
      */
     private function alwaysFullStore(int $maxPolls): BulkheadStore
     {
-        return new class ($maxPolls) implements BulkheadStore {
-            private int $polls = 0;
+        $store = Understudy::for(BulkheadStore::class);
+        when(fn() => $store->tryAcquire(Arg::any(), Arg::any(), Arg::any()))
+            ->returns(...array_fill(0, $maxPolls, null))
+            ->then()->throws(new \RuntimeException(
+                sprintf('Wait loop polled past its budget of %d polls', $maxPolls),
+            ));
 
-            public function __construct(
-                private readonly int $maxPolls,
-            ) {}
-
-            #[\Override]
-            public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string
-            {
-                ++$this->polls;
-
-                if ($this->polls > $this->maxPolls) {
-                    throw new \RuntimeException(
-                        sprintf('Wait loop polled %d times, past its budget of %d', $this->polls, $this->maxPolls),
-                    );
-                }
-
-                return null;
-            }
-
-            #[\Override]
-            public function release(string $name, string $token): void {}
-
-            #[\Override]
-            public function activeCount(string $name): int
-            {
-                return 0;
-            }
-        };
+        return $store;
     }
 
     private function scriptedStore(int $nullsBeforeToken): BulkheadStore
     {
-        return new class ($nullsBeforeToken) implements BulkheadStore {
-            private int $attempts = 0;
+        $store = Understudy::for(BulkheadStore::class);
+        when(fn() => $store->tryAcquire(Arg::any(), Arg::any(), Arg::any()))
+            ->returns(...[...array_fill(0, $nullsBeforeToken, null), 'token']);
 
-            public function __construct(
-                private readonly int $nullsBeforeToken,
-            ) {}
+        return $store;
+    }
 
-            #[\Override]
-            public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string
-            {
-                $current = $this->attempts;
-                ++$this->attempts;
-
-                return $current < $this->nullsBeforeToken ? null : 'token';
-            }
-
-            #[\Override]
-            public function release(string $name, string $token): void {}
-
-            #[\Override]
-            public function activeCount(string $name): int
-            {
-                return 0;
-            }
-        };
+    /**
+     * A loose double with no stubs: `tryAcquire()` answers the `?string`
+     * default (`null`) forever and `activeCount()` answers `0` — a store
+     * whose slot never frees within any budget.
+     */
+    private function neverGrantsStore(): BulkheadStore
+    {
+        return Understudy::for(BulkheadStore::class);
     }
 }
