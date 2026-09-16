@@ -5,8 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 1.2.0 — 2026-09-16
 
+- Add `BatchBulkheadStore::activeCounts(list $names): array` — an active-load snapshot for many bulkheads at once, for least-loaded selection among hundreds of candidates without one store round trip per name (#38). All three bundled stores implement it: read-only for slots, `0` for names without active slots, duplicate names collapsed, first-seen order. `RedisBulkheadStore` does it in one Lua round trip that prunes expired leases and counts every key at the same server `TIME` (mutually consistent counts; any Redis error propagates, no partial result); APCu and in-memory read per name. Redis Cluster needs a hash tag in `keyPrefix` (`{bulkhead}:`) or the multi-key call fails with `CROSSSLOT`.
+- Add `BulkheadMultiKeyScriptRunner::runMany(script, keys, args): list<int>`, implemented by `PredisScriptRunner` and `PhpRedisScriptRunner`. `RedisBulkheadStore` uses it for `activeCounts()` and degrades to one `activeCount()` call per name with a custom single-key `BulkheadScriptRunner`. Existing interfaces are unchanged.
 - Switch the test suite's hand-rolled doubles (anonymous `BulkheadStore` scripted/throwing/poll-budget fakes and the predis `ClientInterface` fake) to `rasuvaeff/understudy` via the `rasuvaeff/understudy-testo` adapter: `scriptedStore(n)` is a `->returns(null × n, 'token')` chain (last link repeats), the poll-budget fake is `->returns(...)->then()->throws()`, an always-full store is a loose double with no stubs, and verification/reset run automatically after each test. Dev-only; no runtime changes.
 
 ## 1.1.3 — 2026-08-21

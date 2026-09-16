@@ -40,6 +40,21 @@ final class PhpRedisIntegrationTest
         $this->store = new RedisBulkheadStore(new PhpRedisScriptRunner($this->client));
     }
 
+    public function activeCountsSnapshotsManyNamesInOneCall(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        Assert::true($this->store->tryAcquire('busy', 2, Duration::seconds(30)) !== null);
+        Assert::true($this->store->tryAcquire('stale', 2, Duration::millis(100)) !== null);
+        usleep(200_000);
+
+        $counts = $this->store->activeCounts(['busy', 'stale', 'missing', 'busy']);
+
+        Assert::same($counts, ['busy' => 1, 'stale' => 0, 'missing' => 0]);
+    }
+
     public function acquiresUpToMaxThenReturnsNull(): void
     {
         if (!isset($this->store)) {

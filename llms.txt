@@ -44,14 +44,18 @@ Namespace `Rasuvaeff\Bulkhead`.
   "outcome unknown", never "did not happen" (the slot returns via its lease).
 - `keyPrefix` is trusted configuration (not validated, unlike `name`) — never
   pass untrusted input as the prefix.
-- `availableSlots()`/`activeCount()` on Redis WRITE (they prune expired members);
-  don't point the store at a read-only replica.
+- `availableSlots()`/`activeCount()`/`activeCounts()` on Redis WRITE (they prune
+  expired members); don't point the store at a read-only replica.
+- `activeCounts()` on Redis Cluster needs a hash tag in `keyPrefix` (`{bulkhead}:`),
+  otherwise a multi-name call fails with CROSSSLOT.
 - Redis acquire is atomic via one Lua script (prune expired -> check ZCARD <
   max -> ZADD; the key TTL never shrinks). Scripts go over EVALSHA with an EVAL
   fallback on NOSCRIPT. APCu has no server-side scripting, so `ApcuBulkheadStore`
   gets the same atomicity from a short-lived `apcu_add` spinlock around the
   read-check-write (spin budget configurable via `lockMaxAttempts`/`lockRetryMicros`).
-- Implement `BulkheadScriptRunner` to back the Redis store with another client.
+- Implement `BulkheadScriptRunner` to back the Redis store with another client;
+  also implement `BulkheadMultiKeyScriptRunner` or `activeCounts()` degrades to
+  one call per name.
 
 ## API
 
@@ -120,5 +124,37 @@ interface BulkheadStore
     public function tryAcquire(string $name, int $maxConcurrent, Duration $lease): ?string;
     public function release(string $name, string $token): void;
     public function activeCount(string $name): int;
+}
+```
+
+### BatchBulkheadStore — least-loaded selection among many bulkheads
+
+All bundled stores implement it. Read-only for slots; missing names -> 0;
+duplicates collapsed; first-seen order; a numeric name like '42' comes back as
+int key 42 (PHP array semantics). Redis: one Lua round trip, all keys pruned and
+counted at the same server TIME (needs a `BulkheadMultiKeyScriptRunner`; both
+bundled runners are); O(names x log slots) inside one script that blocks the
+single-threaded server for its duration — hundreds of names fine, not a full
+key scan. APCu/in-memory: per-name reads. Redis errors propagate, no partial
+result.
+
+```php
+interface BatchBulkheadStore extends BulkheadStore
+{
+    /** @param list<non-empty-string> $names  @return array<int|non-empty-string, int<0, max>> */
+    public function activeCounts(array $names): array;
+}
+
+$counts = $store->activeCounts(['proxy-1', 'proxy-2', 'proxy-3']); // ['proxy-1' => 4, 'proxy-2' => 0, 'proxy-3' => 7]
+$leastLoaded = (string) array_search(min($counts), $counts, true); // (string): a numeric name like '42' comes back as int key 42
+```
+
+### BulkheadMultiKeyScriptRunner (custom Redis client, batch support)
+
+```php
+interface BulkheadMultiKeyScriptRunner extends BulkheadScriptRunner
+{
+    /** @param list<string> $keys  @param list<int|string> $args  @return list<int> one per key, same order */
+    public function runMany(string $script, array $keys, array $args): array;
 }
 ```

@@ -18,9 +18,13 @@ use Rasuvaeff\Duration\Duration;
  * Assumes Redis 5+ (effects replication), so `redis.call('TIME')` inside the
  * script needs no `replicate_commands()`.
  *
+ * {@see activeCounts()} sends every requested key to one script. On Redis
+ * Cluster that is a multi-key command: the keys must share a hash slot, so the
+ * key prefix needs a hash tag (e.g. `{bulkhead}:`) or Redis answers CROSSSLOT.
+ *
  * @api
  */
-final readonly class RedisBulkheadStore implements BulkheadStore
+final readonly class RedisBulkheadStore implements BatchBulkheadStore
 {
     private const string ACQUIRE = <<<'LUA'
         local now = redis.call('TIME')
@@ -47,6 +51,17 @@ final readonly class RedisBulkheadStore implements BulkheadStore
         local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
         redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
         return redis.call('ZCARD', KEYS[1])
+        LUA;
+
+    private const string COUNT_MANY = <<<'LUA'
+        local now = redis.call('TIME')
+        local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+        local counts = {}
+        for i, key in ipairs(KEYS) do
+            redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms)
+            counts[i] = redis.call('ZCARD', key)
+        end
+        return counts
         LUA;
 
     public function __construct(
@@ -77,6 +92,40 @@ final readonly class RedisBulkheadStore implements BulkheadStore
     public function activeCount(string $name): int
     {
         return max(0, $this->runner->run(self::COUNT, $this->key($name), []));
+    }
+
+    /**
+     * One round trip: every key is pruned and counted at the same `TIME`, so
+     * the snapshot is consistent across names. Falls back to one
+     * {@see activeCount()} call per name when the runner cannot address several
+     * keys at once. Any Redis error propagates unchanged — no partial result.
+     */
+    #[\Override]
+    public function activeCounts(array $names): array
+    {
+        $names = array_values(array_unique($names));
+
+        if ($names === []) {
+            return [];
+        }
+
+        $counts = [];
+
+        if (!$this->runner instanceof BulkheadMultiKeyScriptRunner) {
+            foreach ($names as $name) {
+                $counts[$name] = $this->activeCount($name);
+            }
+
+            return $counts;
+        }
+
+        $replies = $this->runner->runMany(self::COUNT_MANY, array_map($this->key(...), $names), []);
+
+        foreach ($names as $index => $name) {
+            $counts[$name] = max(0, $replies[$index] ?? 0);
+        }
+
+        return $counts;
     }
 
     private function key(string $name): string

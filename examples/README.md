@@ -9,7 +9,7 @@ php examples/basic.php
 
 | Script | Shows | Needs server? |
 |---|---|---|
-| `basic.php` | In-memory store: a call, available slots, fast-fail when full | no |
+| `basic.php` | In-memory store: a call, available slots, fast-fail when full, least-loaded pick via `activeCounts()` | no |
 | `redis.php` | Cross-process limiting via `RedisBulkheadStore` + predis | yes |
 | `phpredis.php` | Same store via `ext-redis`, plus `pollJitter` and `onAccepted` | yes (needs `ext-redis`) |
 | `apcu.php` | Single-host cross-process limiting via `ApcuBulkheadStore` | no (needs `ext-apcu`) |

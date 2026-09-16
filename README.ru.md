@@ -96,6 +96,40 @@ $bulkhead = new SharedBulkhead(
 );
 ```
 
+### Выбор наименее нагруженного bulkhead
+
+Когда запрос может пойти через любой из многих bulkhead'ов (пул upstream-прокси,
+по bulkhead'у на соединение), выбирайте самый свободный по одному снимку, а не
+вызовом `activeCount()` на каждого кандидата:
+
+```php
+use Rasuvaeff\Bulkhead\BatchBulkheadStore;
+
+/** @var BatchBulkheadStore $store */
+$counts = $store->activeCounts(['proxy-1', 'proxy-2', 'proxy-3']); // ['proxy-1' => 4, 'proxy-2' => 0, 'proxy-3' => 7]
+$leastLoaded = (string) array_search(min($counts), $counts, true); // (string): a numeric name like '42' comes back as int key 42
+```
+
+Все три встроенных хранилища реализуют `BatchBulkheadStore`. `activeCounts()`
+не трогает слоты (не берёт и не освобождает), возвращает `0` для имени без
+активных слотов, схлопывает дубли имён и сохраняет порядок первого появления
+(ключи массива по правилам PHP: числовое имя `'42'` вернётся int-ключом `42`).
+В Redis это **один round trip** — один Lua-скрипт удаляет протухшие lease'ы и
+считает все ключи по одному серверному `TIME`, поэтому счётчики согласованы
+между собой — при условии, что раннер реализует
+`BulkheadMultiKeyScriptRunner` (оба встроенных реализуют; кастомный
+однокключевой `BulkheadScriptRunner` деградирует до вызова на имя). Любая
+ошибка Redis пробрасывается как есть — частичного результата нет. Стоимость
+на сервере — O(имён × log слотов), и, поскольку Redis однопоточный, весь
+скрипт блокирует остальных клиентов на это время: сотни имён — заметно меньше
+миллисекунды, десятки тысяч — уже пауза, так что batch-выбор — для списка
+кандидатов, а не для обхода всех ключей. В APCu и в памяти это чтение на имя,
+так что снимок согласован в пределах имени, а не между именами.
+
+**Redis Cluster:** multi-key скрипт требует, чтобы все ключи лежали в одном
+hash slot, — добавьте hash tag в префикс: `new RedisBulkheadStore($runner,
+'{bulkhead}:')`, иначе Redis отвергнет вызов с `CROSSSLOT`.
+
 ### Публичный API
 
 | Тип | Описание |
@@ -103,12 +137,14 @@ $bulkhead = new SharedBulkhead(
 | `Bulkhead` | Интерфейс: `call(callable): mixed`, `availableSlots(): int` |
 | `SharedBulkhead` | Ограничивает параллелизм через `BulkheadStore`; fast-fail или ожидание до `maxWait`; открывает `name()`, `maxConcurrent()` |
 | `BulkheadStore` | Backing-хранилище: `tryAcquire`, `release`, `activeCount` |
-| `RedisBulkheadStore` | Межхостовое cross-process-хранилище; sorted set + Lua, атомарный acquire, TTL lease |
+| `BatchBulkheadStore` | `BulkheadStore` + `activeCounts(list $names): array` — один снимок для многих имён |
+| `RedisBulkheadStore` | Межхостовое cross-process-хранилище; sorted set + Lua, атомарный acquire, TTL lease; batch-снимок за один round trip |
 | `ApcuBulkheadStore` | Однохостовое cross-process-хранилище; spinlock на APCu, атомарный acquire, TTL lease |
 | `InMemoryBulkheadStore` | Однопроцессное хранилище (тесты/CLI); не координирует процессы |
 | `BulkheadScriptRunner` | Типизированный шов поверх вызова Redis-скрипта (реализуйте для других клиентов) |
-| `Redis\PredisScriptRunner` | `BulkheadScriptRunner` поверх predis; EVALSHA с откатом на EVAL |
-| `Redis\PhpRedisScriptRunner` | `BulkheadScriptRunner` поверх `ext-redis`; EVALSHA с откатом на EVAL |
+| `BulkheadMultiKeyScriptRunner` | `BulkheadScriptRunner` + `runMany(script, keys, args): list<int>` — нужен для `activeCounts()` за один round trip |
+| `Redis\PredisScriptRunner` | `BulkheadMultiKeyScriptRunner` поверх predis; EVALSHA с откатом на EVAL |
+| `Redis\PhpRedisScriptRunner` | `BulkheadMultiKeyScriptRunner` поверх `ext-redis`; EVALSHA с откатом на EVAL |
 | `BulkheadFullException` | Выбрасывается, когда за `maxWait` нет свободного слота; несёт `name`, `maxConcurrent` |
 | `Sleeper\SleeperInterface` | Стратегия ожидания при polling; `SystemSleeper`, `FakeSleeper` |
 
@@ -196,8 +232,10 @@ $bulkhead = new SharedBulkhead(
 - **Ожидание не FIFO.** Ожидающие опрашивают; слот достаётся тому, кто опросил
   сразу после release. При устойчивой перегрузке ожидающий может голодать дольше
   `maxWait` и быть отброшенным, пока более поздние проходят.
-- `availableSlots()` / `activeCount()` в Redis **пишут** (они удаляют протухшие
-  member'ы), поэтому их нельзя наводить на read-only-реплику.
+- `availableSlots()` / `activeCount()` / `activeCounts()` в Redis **пишут** (они
+  удаляют протухшие member'ы), поэтому их нельзя наводить на read-only-реплику.
+- `activeCounts()` в Redis Cluster требует hash tag в `keyPrefix`
+  (`{bulkhead}:`); без него вызов с несколькими именами падает с `CROSSSLOT`.
 - `InMemoryBulkheadStore` работает только в рамках одного процесса — он **не**
   ограничивает пул FPM. Используйте его для тестов и CLI-инструментов.
 - `ApcuBulkheadStore` ограничивает воркеров только в пределах **одной машины**.
@@ -218,7 +256,7 @@ $bulkhead = new SharedBulkhead(
 
 | Скрипт | Показывает | Нужен сервер? |
 |---|---|---|
-| `basic.php` | Хранилище в памяти, fast-fail при заполнении | нет |
+| `basic.php` | Хранилище в памяти, fast-fail при заполнении, выбор наименее нагруженного через `activeCounts()` | нет |
 | `redis.php` | Cross-process-ограничение через Redis | да (`REDIS_HOST`) |
 | `apcu.php` | Однохостовое cross-process-ограничение через APCu | нет (нужен `ext-apcu`) |
 

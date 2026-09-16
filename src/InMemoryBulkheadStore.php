@@ -18,7 +18,7 @@ use Rasuvaeff\Duration\Duration;
  *
  * @api
  */
-final class InMemoryBulkheadStore implements BulkheadStore
+final class InMemoryBulkheadStore implements BatchBulkheadStore
 {
     /** @var array<string, array<non-empty-string, true>> */
     private array $slots = [];
@@ -48,5 +48,17 @@ final class InMemoryBulkheadStore implements BulkheadStore
     public function activeCount(string $name): int
     {
         return count($this->slots[$name] ?? []);
+    }
+
+    #[\Override]
+    public function activeCounts(array $names): array
+    {
+        $counts = [];
+
+        foreach ($names as $name) {
+            $counts[$name] = $this->activeCount($name);
+        }
+
+        return $counts;
     }
 }
