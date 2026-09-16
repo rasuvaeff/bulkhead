@@ -49,6 +49,25 @@ final class ApcuBulkheadIntegrationTest
         Assert::same($this->store->activeCount(self::NAME), 2);
     }
 
+    public function activeCountsSnapshotsManyNamesPrunesExpiredAndZeroesMissing(): void
+    {
+        if ($this->store === null) {
+            return;
+        }
+
+        Assert::true($this->store->tryAcquire('busy', 3, Duration::seconds(30)) !== null);
+        Assert::true($this->store->tryAcquire('busy', 3, Duration::seconds(30)) !== null);
+        Assert::true($this->store->tryAcquire('stale', 3, Duration::millis(100)) !== null);
+        usleep(200_000);
+
+        $names = array_map(static fn(int $i): string => 'proxy-' . $i, range(1, 120));
+        $counts = $this->store->activeCounts(['busy', 'stale', 'missing', 'busy', ...$names]);
+
+        Assert::same(array_slice($counts, 0, 3, preserve_keys: true), ['busy' => 2, 'stale' => 0, 'missing' => 0]);
+        Assert::same(count($counts), 123);
+        Assert::same(array_sum($counts), 2);
+    }
+
     public function namesAreIsolated(): void
     {
         if ($this->store === null) {

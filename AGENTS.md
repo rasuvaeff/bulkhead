@@ -12,7 +12,11 @@ Lua, atomic acquire, multi-host; client-agnostic via `BulkheadScriptRunner` —
 `Redis\PredisScriptRunner` for predis, `Redis\PhpRedisScriptRunner` for
 `ext-redis`, both EVALSHA-first) and `ApcuBulkheadStore` (APCu spinlock over
 `apcu_add`, single-host only); `InMemoryBulkheadStore` is single-process only
-(tests/CLI). Lease/wait values are `rasuvaeff/duration` `Duration`s.
+(tests/CLI). All three also implement `BatchBulkheadStore::activeCounts()` —
+a read-only load snapshot over many names for least-loaded selection; on Redis
+it is one multi-key Lua call through `BulkheadMultiKeyScriptRunner::runMany()`
+(needs a hash tag in `keyPrefix` on Redis Cluster). Lease/wait values are
+`rasuvaeff/duration` `Duration`s.
 
 ## Golden rules
 

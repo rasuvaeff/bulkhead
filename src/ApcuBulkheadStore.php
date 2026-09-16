@@ -28,7 +28,7 @@ use Rasuvaeff\Duration\Duration;
  *
  * @api
  */
-final readonly class ApcuBulkheadStore implements BulkheadStore
+final readonly class ApcuBulkheadStore implements BatchBulkheadStore
 {
     private const int LOCK_TTL_SECONDS = 1;
 
@@ -103,6 +103,22 @@ final readonly class ApcuBulkheadStore implements BulkheadStore
     public function activeCount(string $name): int
     {
         return count($this->liveSlots($name));
+    }
+
+    /**
+     * Lock-free like {@see activeCount()}: each name is read with its own
+     * `apcu_fetch`, so the snapshot is per-name, not across names.
+     */
+    #[\Override]
+    public function activeCounts(array $names): array
+    {
+        $counts = [];
+
+        foreach ($names as $name) {
+            $counts[$name] = $this->activeCount($name);
+        }
+
+        return $counts;
     }
 
     /**

@@ -22,6 +22,9 @@
     //    matters to count(), the value is an unread marker;
     //  - SharedBulkhead/RedisBulkheadStore `max(0, ...)` -> `max(-1, ...)`: the
     //    difference is never negative (activeCount >= 0 always), floor unreachable;
+    //  - RedisBulkheadStore::activeCounts `$replies[$index] ?? 0` -> `?? -1`: the
+    //    missing-reply default sits inside the same `max(0, ...)` clamp, so any
+    //    value <= 0 is observably identical;
     //  - ApcuBulkheadStore/RedisBulkheadStore key-concat reorder (`$a.$b`-> `$b.$a`):
     //    cosmetic, no test can distinguish two equally-injective orderings;
     //  - ApcuBulkheadStore::lockKey ConcatOperandRemoval (drops prefix or name):

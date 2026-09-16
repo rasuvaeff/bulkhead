@@ -67,6 +67,49 @@ final class PredisScriptRunnerTest
         Assert::same($runner->run('return 3', 'k', []), 3);
     }
 
+    public function runManySendsEveryKeyWithTheirCount(): void
+    {
+        $client = $this->client(reply: [1, 2]);
+        $runner = new PredisScriptRunner($client);
+
+        $result = $runner->runMany('return {1, 2}', ['bulkhead:a', 'bulkhead:b'], [5000]);
+
+        Assert::same($result, [1, 2]);
+        Assert::same($this->executedCommands($client), [
+            ['EVALSHA', [sha1('return {1, 2}'), 2, 'bulkhead:a', 'bulkhead:b', 5000]],
+        ]);
+    }
+
+    public function runManyFallsBackToEvalWhenScriptNotCached(): void
+    {
+        $client = $this->client(reply: [0, 1], evalshaError: 'NOSCRIPT No matching script. Please use EVAL.');
+        $runner = new PredisScriptRunner($client);
+
+        $result = $runner->runMany('return {0, 1}', ['k1', 'k2'], []);
+
+        Assert::same($result, [0, 1]);
+        Assert::same($this->executedCommands($client), [
+            ['EVALSHA', [sha1('return {0, 1}'), 2, 'k1', 'k2']],
+            ['EVAL', ['return {0, 1}', 2, 'k1', 'k2']],
+        ]);
+    }
+
+    public function runManyCastsEachReplyToIntAndDropsKeys(): void
+    {
+        $client = $this->client(reply: ['x' => '3', 'y' => 4, 'z' => null]);
+        $runner = new PredisScriptRunner($client);
+
+        Assert::same($runner->runMany('return {}', ['k'], []), [3, 4, 0]);
+    }
+
+    public function runManyTreatsANonArrayReplyAsEmpty(): void
+    {
+        $client = $this->client(reply: 3);
+        $runner = new PredisScriptRunner($client);
+
+        Assert::same($runner->runMany('return 3', ['k'], []), []);
+    }
+
     private function client(mixed $reply, ?string $evalshaError = null): ClientInterface
     {
         $client = Understudy::for(ClientInterface::class);

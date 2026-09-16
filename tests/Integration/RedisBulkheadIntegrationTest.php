@@ -139,6 +139,52 @@ final class RedisBulkheadIntegrationTest
         Assert::same($this->store->activeCount(self::NAME), 1);
     }
 
+    public function activeCountsSnapshotsManyNamesPrunesExpiredAndZeroesMissing(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        Assert::true($this->store->tryAcquire('busy', 3, Duration::seconds(30)) !== null);
+        Assert::true($this->store->tryAcquire('busy', 3, Duration::seconds(30)) !== null);
+        Assert::true($this->store->tryAcquire('stale', 3, Duration::millis(100)) !== null);
+        usleep(200_000);
+
+        $counts = $this->store->activeCounts(['busy', 'stale', 'missing', 'busy']);
+
+        Assert::same($counts, ['busy' => 2, 'stale' => 0, 'missing' => 0]);
+        Assert::same($this->client->zcard('bulkhead:stale'), 0);
+        Assert::same($this->client->exists('bulkhead:missing'), 0);
+    }
+
+    public function activeCountsHandlesAHundredNamesInOneCall(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        $names = array_map(static fn(int $i): string => 'proxy-' . $i, range(1, 120));
+        Assert::true($this->store->tryAcquire('proxy-42', 1, Duration::seconds(30)) !== null);
+
+        $counts = $this->store->activeCounts($names);
+
+        Assert::same(count($counts), 120);
+        Assert::same(array_keys($counts), $names);
+        Assert::same(array_sum($counts), 1);
+        Assert::same($counts['proxy-42'], 1);
+    }
+
+    public function activeCountsSurvivesAFlushedScriptCache(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        $this->client->script('FLUSH');
+
+        Assert::same($this->store->activeCounts(['a', 'b']), ['a' => 0, 'b' => 0]);
+    }
+
     public function acquireSurvivesAFlushedScriptCache(): void
     {
         if (!isset($this->store)) {

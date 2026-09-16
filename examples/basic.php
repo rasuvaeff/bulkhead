@@ -32,3 +32,9 @@ try {
 } catch (BulkheadFullException $e) {
     printf("rejected: %s\n", $e->getMessage());
 }
+
+// Choosing among many bulkheads: one snapshot instead of one activeCount() per
+// candidate. 'legacy-api' still holds both slots from above.
+$counts = $store->activeCounts(['legacy-api', 'mirror-api', 'legacy-api']);
+printf("active counts: %s\n", json_encode($counts));
+printf("least loaded: %s\n", (string) array_search(min($counts), $counts, true)); // (string): a numeric name like '42' comes back as int key 42

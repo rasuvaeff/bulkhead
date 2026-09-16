@@ -94,6 +94,40 @@ $bulkhead = new SharedBulkhead(
 );
 ```
 
+### Picking the least-loaded bulkhead
+
+When one request may go through any of many bulkheads (a pool of upstream
+proxies, one bulkhead per connection), pick the emptiest one from a single
+snapshot instead of calling `activeCount()` once per candidate:
+
+```php
+use Rasuvaeff\Bulkhead\BatchBulkheadStore;
+
+/** @var BatchBulkheadStore $store */
+$counts = $store->activeCounts(['proxy-1', 'proxy-2', 'proxy-3']); // ['proxy-1' => 4, 'proxy-2' => 0, 'proxy-3' => 7]
+$leastLoaded = (string) array_search(min($counts), $counts, true); // (string): a numeric name like '42' comes back as int key 42
+```
+
+All three bundled stores implement `BatchBulkheadStore`. `activeCounts()` is
+read-only with respect to slots (it never acquires or releases one), returns
+`0` for a name with no active slots, collapses duplicate names, and keeps the
+first-seen order (PHP array keys: a numeric name like `'42'` comes back as the
+int key `42`). On Redis it is **one round trip** — one Lua script that prunes
+expired leases and counts every key at the same server `TIME`, so the counts
+are mutually consistent — provided the runner implements
+`BulkheadMultiKeyScriptRunner` (both bundled runners do; a custom
+single-key `BulkheadScriptRunner` degrades to one call per name). Any Redis
+error propagates as-is: there is no partial result. Cost on the server is
+O(names × log slots), and — Redis being single-threaded — the whole script
+blocks every other client for that long: hundreds of names cost well under a
+millisecond, tens of thousands would be a stall, so batch selection is for
+candidate lists, not for scanning every key. On APCu and in memory it is a
+per-name read, so the snapshot is per name rather than across names.
+
+**Redis Cluster:** a multi-key script requires every key in one hash slot, so
+put a hash tag in the prefix — `new RedisBulkheadStore($runner, '{bulkhead}:')` —
+or Redis rejects the call with `CROSSSLOT`.
+
 ### Public API
 
 | Type | Description |
@@ -101,12 +135,14 @@ $bulkhead = new SharedBulkhead(
 | `Bulkhead` | Interface: `call(callable): mixed`, `availableSlots(): int` |
 | `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait`; exposes `name()`, `maxConcurrent()` |
 | `BulkheadStore` | Backing store: `tryAcquire`, `release`, `activeCount` |
-| `RedisBulkheadStore` | Multi-host cross-process store; sorted-set + Lua, atomic acquire, lease TTL |
+| `BatchBulkheadStore` | `BulkheadStore` + `activeCounts(list $names): array` — one snapshot for many names |
+| `RedisBulkheadStore` | Multi-host cross-process store; sorted-set + Lua, atomic acquire, lease TTL; batch snapshot in one round trip |
 | `ApcuBulkheadStore` | Single-host cross-process store; APCu spinlock, atomic acquire, lease TTL |
 | `InMemoryBulkheadStore` | Single-process store (tests / CLI); does not coordinate across processes |
 | `BulkheadScriptRunner` | Typed seam over a Redis script call (implement for another client) |
-| `Redis\PredisScriptRunner` | predis-backed `BulkheadScriptRunner`; EVALSHA with EVAL fallback |
-| `Redis\PhpRedisScriptRunner` | `ext-redis`-backed `BulkheadScriptRunner`; EVALSHA with EVAL fallback |
+| `BulkheadMultiKeyScriptRunner` | `BulkheadScriptRunner` + `runMany(script, keys, args): list<int>` — needed for the one-round-trip `activeCounts()` |
+| `Redis\PredisScriptRunner` | predis-backed `BulkheadMultiKeyScriptRunner`; EVALSHA with EVAL fallback |
+| `Redis\PhpRedisScriptRunner` | `ext-redis`-backed `BulkheadMultiKeyScriptRunner`; EVALSHA with EVAL fallback |
 | `BulkheadFullException` | Thrown when no slot is available within `maxWait`; carries `name`, `maxConcurrent` |
 | `Sleeper\SleeperInterface` | Wait strategy while polling; `SystemSleeper`, `FakeSleeper` |
 
@@ -191,8 +227,10 @@ doesn't span machines; use `RedisBulkheadStore` for a pool spread across hosts.
 - **Waiting is not FIFO.** Waiters poll; whoever polls right after a release
   wins the slot. Under sustained overload a waiter can starve past `maxWait`
   and be rejected while later arrivals get through.
-- `availableSlots()` / `activeCount()` on Redis **write** (they prune expired
-  members), so they can't be pointed at a read-only replica.
+- `availableSlots()` / `activeCount()` / `activeCounts()` on Redis **write**
+  (they prune expired members), so they can't be pointed at a read-only replica.
+- `activeCounts()` on Redis Cluster needs a hash tag in `keyPrefix`
+  (`{bulkhead}:`); without it a multi-name call fails with `CROSSSLOT`.
 - `InMemoryBulkheadStore` is single-process only — it does **not** limit the FPM
   pool. Use it for tests and CLI tools.
 - `ApcuBulkheadStore` only limits workers on the **same machine**. A pool spread
