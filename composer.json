@@ -29,10 +29,10 @@
     "require-dev": {
         "ergebnis/composer-normalize": "^2.51",
         "friendsofphp/php-cs-fixer": "^3.95",
-        "infection/infection": "^0.33 || ^0.34 || ^0.35",
+        "infection/infection": "^0.35",
         "maglnet/composer-require-checker": "^4.17",
         "predis/predis": "^2.2 || ^3.0",
-        "rasuvaeff/property-testing-testo": "^0.6 || ^0.9",
+        "rasuvaeff/property-testing-testo": "^1.0",
         "rasuvaeff/rector-named-literals": "^1.0",
         "rasuvaeff/understudy-testo": "^0.3",
         "rector/rector": "^2.4",
