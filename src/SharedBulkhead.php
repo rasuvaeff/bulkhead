@@ -4,26 +4,27 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Bulkhead;
 
+use Rasuvaeff\Bulkhead\Internal\Limits;
+use Rasuvaeff\Bulkhead\Internal\SlotWaiter;
 use Rasuvaeff\Bulkhead\Sleeper\SleeperInterface;
-use Rasuvaeff\Bulkhead\Sleeper\SystemSleeper;
 use Rasuvaeff\Duration\Duration;
 
 /**
  * Concurrency limiter that admits at most $maxConcurrent simultaneous calls,
  * counted across every process sharing the {@see BulkheadStore}.
  *
+ * The name and the limit are fixed per instance; when they are known only
+ * per call (one limit per proxy, per tenant), use {@see KeyedBulkhead}.
+ *
  * @api
  */
 final readonly class SharedBulkhead implements Bulkhead
 {
-    private const string NAME_PATTERN = '/^[A-Za-z0-9_.:-]+\z/';
-
     /** @var non-empty-string */
     private string $name;
     /** @var positive-int */
     private int $maxConcurrent;
-    private Duration $pollInterval;
-    private SleeperInterface $sleeper;
+    private SlotWaiter $waiter;
 
     /**
      * @param Duration  $lease    TTL of a held slot; MUST exceed the longest expected
@@ -43,63 +44,53 @@ final readonly class SharedBulkhead implements Bulkhead
         string $name,
         int $maxConcurrent,
         private BulkheadStore $store,
-        private Duration $lease,
-        private Duration $maxWait,
+        Duration $lease,
+        Duration $maxWait,
         ?Duration $pollInterval = null,
-        private float $pollJitter = 0.0,
+        float $pollJitter = 0.0,
         ?SleeperInterface $sleeper = null,
-        private ?\Closure $onAccepted = null,
-        private ?\Closure $onRejected = null,
+        ?\Closure $onAccepted = null,
+        ?\Closure $onRejected = null,
     ) {
-        if ($name === '' || preg_match(self::NAME_PATTERN, $name) !== 1) {
-            throw new \InvalidArgumentException(sprintf('Invalid bulkhead name "%s"', $name));
-        }
-        if ($maxConcurrent < 1) {
-            throw new \InvalidArgumentException('Max concurrent must be greater than or equal to 1');
-        }
-        if ($lease->isZero()) {
-            throw new \InvalidArgumentException('Lease must be greater than zero');
-        }
-        if ($pollJitter < 0.0 || $pollJitter > 1.0) {
-            throw new \InvalidArgumentException('Poll jitter must be between 0 and 1');
-        }
-
-        $pollInterval ??= Duration::millis(50);
-        if ($pollInterval->isZero()) {
-            throw new \InvalidArgumentException('Poll interval must be greater than zero');
-        }
-
-        $this->name = $name;
-        $this->maxConcurrent = $maxConcurrent;
-        $this->pollInterval = $pollInterval;
-        $this->sleeper = $sleeper ?? new SystemSleeper();
+        $this->name = Limits::name($name);
+        $this->maxConcurrent = Limits::maxConcurrent($maxConcurrent);
+        $this->waiter = new SlotWaiter(
+            store: $store,
+            lease: $lease,
+            maxWait: $maxWait,
+            pollInterval: $pollInterval,
+            pollJitter: $pollJitter,
+            sleeper: $sleeper,
+            onAccepted: $onAccepted,
+            onRejected: $onRejected,
+        );
     }
 
     #[\Override]
     public function call(callable $callback): mixed
     {
-        [$token, $waited] = $this->acquire();
+        return $this->waiter->call(name: $this->name, maxConcurrent: $this->maxConcurrent, callback: $callback);
+    }
 
-        if ($token === null) {
-            if ($this->onRejected instanceof \Closure) {
-                ($this->onRejected)($this->name, $waited);
-            }
+    /**
+     * Take a slot and keep it past this call: wait up to `maxWait`, then hand
+     * the slot over. Release it with {@see Slot::release()} wherever the work
+     * actually ends.
+     *
+     * @throws BulkheadFullException when no slot is available within `maxWait`
+     */
+    public function acquire(): Slot
+    {
+        return $this->waiter->acquire(name: $this->name, maxConcurrent: $this->maxConcurrent);
+    }
 
-            throw new BulkheadFullException(name: $this->name, maxConcurrent: $this->maxConcurrent);
-        }
-
-        try {
-            // Inside the try: a throwing observer callback must not leak the
-            // just-acquired slot past release() (with InMemoryBulkheadStore
-            // the lease is ignored, so the leak would be permanent).
-            if ($this->onAccepted instanceof \Closure) {
-                ($this->onAccepted)($this->name, $waited);
-            }
-
-            return $callback();
-        } finally {
-            $this->store->release(name: $this->name, token: $token);
-        }
+    /**
+     * {@see acquire()} without waiting and without throwing: null when every
+     * slot is taken (`onRejected` still fires).
+     */
+    public function tryAcquire(): ?Slot
+    {
+        return $this->waiter->tryAcquire(name: $this->name, maxConcurrent: $this->maxConcurrent);
     }
 
     #[\Override]
@@ -122,47 +113,5 @@ final readonly class SharedBulkhead implements Bulkhead
     public function maxConcurrent(): int
     {
         return $this->maxConcurrent;
-    }
-
-    /**
-     * @return array{non-empty-string|null, Duration} acquired token (null when full)
-     *                                                and total time spent waiting
-     */
-    private function acquire(): array
-    {
-        $waited = Duration::zero();
-
-        while (true) {
-            $token = $this->store->tryAcquire(
-                name: $this->name,
-                maxConcurrent: $this->maxConcurrent,
-                lease: $this->lease,
-            );
-
-            if ($token !== null) {
-                return [$token, $waited];
-            }
-
-            $remaining = $this->maxWait->minus($waited);
-            if ($remaining->isZero()) {
-                return [null, $waited];
-            }
-
-            $sleep = Duration::min($remaining, $this->jitteredPollInterval());
-            $this->sleeper->sleep($sleep);
-            $waited = $waited->plus($sleep);
-        }
-    }
-
-    private function jitteredPollInterval(): Duration
-    {
-        if ($this->pollJitter === 0.0) {
-            return $this->pollInterval;
-        }
-
-        $micros = $this->pollInterval->toMicros();
-        $maxDelta = (int) ((float) $micros * $this->pollJitter);
-
-        return Duration::micros(max(1, $micros + random_int(-$maxDelta, $maxDelta)));
     }
 }

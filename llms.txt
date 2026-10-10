@@ -81,13 +81,35 @@ $bulkhead = new SharedBulkhead(
 try {
     $value = $bulkhead->call(static fn(): string => callDownstream());
 } catch (BulkheadFullException $e) {
-    // $e->name, $e->maxConcurrent — degrade gracefully
+    // $e->name, $e->maxConcurrent, $e->waited (?Duration), $e->lease (?Duration)
+    // $e->retryAfter(): ?Duration — the lease; an upper bound on when a slot frees
 }
 
 $bulkhead->availableSlots(); // int >= 0
 $bulkhead->name();           // non-empty-string
 $bulkhead->maxConcurrent();  // positive-int
+
+$slot = $bulkhead->acquire();    // Slot; waits up to maxWait, throws BulkheadFullException
+$slot = $bulkhead->tryAcquire(); // ?Slot; never waits, null when full (onRejected fires)
+$slot->release();                // idempotent; release where the work actually ends
 ```
+
+Name and limit per call (one limit per proxy / tenant):
+
+```php
+use Rasuvaeff\Bulkhead\KeyedBulkhead;
+
+$keyed = new KeyedBulkhead(store: $store, lease: Duration::seconds(30), maxWait: Duration::zero());
+// same optional knobs as SharedBulkhead: pollInterval, pollJitter, sleeper, onAccepted, onRejected
+
+$keyed->call('proxy:7', 4, static fn() => send());   // throws BulkheadFullException when full
+$keyed->acquire('proxy:7', 4);                       // Slot
+$keyed->tryAcquire('proxy:7', 4);                    // ?Slot
+$keyed->availableSlots('proxy:7', 4);                // int >= 0
+```
+
+Tests: `new Sleeper\FakeSleeper(onSleep: fn(Duration $d) => $clock->advanceMs($d->toMillis()))`
+records sleeps and lets each one move a fake clock.
 
 With `ext-redis` instead of predis:
 
