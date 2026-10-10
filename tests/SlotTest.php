@@ -26,7 +26,7 @@ final class SlotTest
         $store = new InMemoryBulkheadStore();
         $token = $store->tryAcquire('svc', 1, Duration::seconds(5));
         Assert::true($token !== null);
-        $slot = new Slot(store: $store, name: 'svc', token: (string) $token);
+        $slot = new Slot(store: $store, name: 'svc', token: $token);
 
         Assert::false($slot->isReleased());
 
