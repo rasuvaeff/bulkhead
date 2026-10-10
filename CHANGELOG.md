@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.3.0 — 2026-10-10
+
+- Add `KeyedBulkhead`: the same wait, lease and observer semantics as `SharedBulkhead`, with the name and limit passed per call (`call(name, max, cb)`, `acquire()`, `tryAcquire()`, `availableSlots()`) — for one limit per proxy, tenant or browser context without dropping to the raw `BulkheadStore` and a hand-written `try`/`finally` (#43).
+- Add `Slot`, a held slot as a value with an idempotent `release()`, returned by the new `SharedBulkhead::acquire()`/`tryAcquire()` and their `KeyedBulkhead` twins: take a slot in one place, release it where the work ends (#43). `acquire()` waits up to `maxWait` and throws `BulkheadFullException`; `tryAcquire()` never waits and returns `null`. A throwing `onAccepted` releases the slot before rethrowing, as in `call()`.
+- `BulkheadFullException` now carries `waited` (time spent waiting) and `lease`, and `retryAfter(): ?Duration` returns the lease as an upper bound on when a slot frees — a `Retry-After` ceiling (#44). Both are new optional constructor parameters; an exception built by hand still works and reports `null`.
+- `Sleeper\FakeSleeper` accepts an optional `onSleep` closure called after each recorded sleep, so a test can advance a fake clock without its own sleeper (#45, additive part).
+- CI: tolerate roave's all-`SKIPPED` BC report, split the mutation path filter, verify the tagged commit before publishing a release.
+
 ## 1.2.0 — 2026-09-16
 
 - Add `BatchBulkheadStore::activeCounts(list $names): array` — an active-load snapshot for many bulkheads at once, for least-loaded selection among hundreds of candidates without one store round trip per name (#38). All three bundled stores implement it: read-only for slots, `0` for names without active slots, duplicate names collapsed, first-seen order. `RedisBulkheadStore` does it in one Lua round trip that prunes expired leases and counts every key at the same server `TIME` (mutually consistent counts; any Redis error propagates, no partial result); APCu and in-memory read per name. Redis Cluster needs a hash tag in `keyPrefix` (`{bulkhead}:`) or the multi-key call fails with `CROSSSLOT`.

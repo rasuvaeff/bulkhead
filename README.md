@@ -94,6 +94,80 @@ $bulkhead = new SharedBulkhead(
 );
 ```
 
+### Per-call name and limit: `KeyedBulkhead`
+
+`SharedBulkhead` fixes its name and limit at construction. When they are
+known only per call — one limit per upstream proxy, per tenant, per browser
+context — use `KeyedBulkhead`: the same store, lease, wait and observer
+settings, with the name and the limit passed to every call.
+
+```php
+use Rasuvaeff\Bulkhead\KeyedBulkhead;
+
+$perProxy = new KeyedBulkhead(
+    store: $store,
+    lease: Duration::seconds(30),
+    maxWait: Duration::zero(),
+);
+
+$response = $perProxy->call("proxy:{$proxy->id}", $proxy->maxConcurrency, static fn() => $client->send($request));
+$perProxy->availableSlots("proxy:{$proxy->id}", $proxy->maxConcurrency);
+```
+
+Each name is an independent bulkhead. Pass the same limit for a name on every
+call: the store checks the active count against the limit the current call
+brings.
+
+### Holding a slot across calls: `Slot`
+
+`call()` releases the slot when the callback returns. When the slot is taken
+in one place and the work ends in another (a connection chosen now, used by a
+later request), take a `Slot` and release it where the work ends:
+
+```php
+$slot = $perProxy->tryAcquire("proxy:{$proxy->id}", $proxy->maxConcurrency); // ?Slot, never waits
+if ($slot === null) {
+    // this proxy is full — try the next one
+}
+
+try {
+    $response = $client->send($request);
+} finally {
+    $slot->release(); // idempotent: a second call never reaches the store
+}
+```
+
+| Method | Waits up to `maxWait` | When full |
+|---|---|---|
+| `call()` | yes | throws `BulkheadFullException` |
+| `acquire(): Slot` | yes | throws `BulkheadFullException` |
+| `tryAcquire(): ?Slot` | no | returns `null` (`onRejected` still fires) |
+
+`SharedBulkhead` has the same `acquire()` / `tryAcquire()` pair without the
+name and limit arguments. A slot that is never released is reclaimed when its
+lease expires (Redis, APCu); `InMemoryBulkheadStore` ignores leases, so there
+it stays taken.
+
+### Retry hint on `BulkheadFullException`
+
+The exception carries how long the call waited (`$e->waited`) and the
+bulkhead's lease (`$e->lease`). `$e->retryAfter()` returns the lease: every
+slot held right now ends within one lease, released by its holder or reclaimed
+when the lease expires, so it is an honest `Retry-After` ceiling. A slot
+usually frees much sooner, and other waiters may take it first.
+
+```php
+try {
+    $perProxy->call($name, $limit, $send);
+} catch (BulkheadFullException $e) {
+    $response = $response->withStatus(503)->withHeader('Retry-After', (string) $e->retryAfter()?->toSeconds());
+}
+```
+
+The hint is relative, unlike circuit-breaker's `CircuitOpenException::$retryAfter`,
+which is an absolute instant: a bulkhead has no clock to anchor one to. Both
+fields are null on an exception constructed by hand.
+
 ### Picking the least-loaded bulkhead
 
 When one request may go through any of many bulkheads (a pool of upstream
@@ -133,7 +207,9 @@ or Redis rejects the call with `CROSSSLOT`.
 | Type | Description |
 |---|---|
 | `Bulkhead` | Interface: `call(callable): mixed`, `availableSlots(): int` |
-| `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait`; exposes `name()`, `maxConcurrent()` |
+| `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait`; exposes `name()`, `maxConcurrent()`, `acquire(): Slot`, `tryAcquire(): ?Slot` |
+| `KeyedBulkhead` | Same semantics with the name and limit passed per call: `call(name, max, cb)`, `acquire(name, max): Slot`, `tryAcquire(name, max): ?Slot`, `availableSlots(name, max)` |
+| `Slot` | One held slot as a value: `name()`, `release()` (idempotent), `isReleased()` |
 | `BulkheadStore` | Backing store: `tryAcquire`, `release`, `activeCount` |
 | `BatchBulkheadStore` | `BulkheadStore` + `activeCounts(list $names): array` — one snapshot for many names |
 | `RedisBulkheadStore` | Multi-host cross-process store; sorted-set + Lua, atomic acquire, lease TTL; batch snapshot in one round trip |
@@ -143,8 +219,8 @@ or Redis rejects the call with `CROSSSLOT`.
 | `BulkheadMultiKeyScriptRunner` | `BulkheadScriptRunner` + `runMany(script, keys, args): list<int>` — needed for the one-round-trip `activeCounts()` |
 | `Redis\PredisScriptRunner` | predis-backed `BulkheadMultiKeyScriptRunner`; EVALSHA with EVAL fallback |
 | `Redis\PhpRedisScriptRunner` | `ext-redis`-backed `BulkheadMultiKeyScriptRunner`; EVALSHA with EVAL fallback |
-| `BulkheadFullException` | Thrown when no slot is available within `maxWait`; carries `name`, `maxConcurrent` |
-| `Sleeper\SleeperInterface` | Wait strategy while polling; `SystemSleeper`, `FakeSleeper` |
+| `BulkheadFullException` | Thrown when no slot is available within `maxWait`; carries `name`, `maxConcurrent`, `waited`, `lease`; `retryAfter(): ?Duration` |
+| `Sleeper\SleeperInterface` | Wait strategy while polling; `SystemSleeper`, `FakeSleeper` (optional `onSleep` hook, e.g. to advance a fake clock) |
 
 ### Sizing the knobs
 

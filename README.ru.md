@@ -96,6 +96,79 @@ $bulkhead = new SharedBulkhead(
 );
 ```
 
+### Имя и лимит на каждый вызов: `KeyedBulkhead`
+
+`SharedBulkhead` фиксирует имя и лимит в конструкторе. Если они известны
+только в момент вызова — свой лимит на каждый upstream-прокси, тенанта,
+браузерный контекст, — используйте `KeyedBulkhead`: те же store, lease,
+ожидание и наблюдатели, а имя и лимит передаются в каждый вызов.
+
+```php
+use Rasuvaeff\Bulkhead\KeyedBulkhead;
+
+$perProxy = new KeyedBulkhead(
+    store: $store,
+    lease: Duration::seconds(30),
+    maxWait: Duration::zero(),
+);
+
+$response = $perProxy->call("proxy:{$proxy->id}", $proxy->maxConcurrency, static fn() => $client->send($request));
+$perProxy->availableSlots("proxy:{$proxy->id}", $proxy->maxConcurrency);
+```
+
+Каждое имя — независимый bulkhead. Передавайте для одного имени один и тот же
+лимит: хранилище сравнивает число активных слотов с лимитом текущего вызова.
+
+### Слот, переживающий вызов: `Slot`
+
+`call()` отпускает слот, когда callback вернул управление. Если слот берётся
+в одном месте, а работа заканчивается в другом (соединение выбрано сейчас,
+используется следующим запросом), возьмите `Slot` и отпустите его там, где
+работа закончилась:
+
+```php
+$slot = $perProxy->tryAcquire("proxy:{$proxy->id}", $proxy->maxConcurrency); // ?Slot, никогда не ждёт
+if ($slot === null) {
+    // прокси заполнен — пробуем следующий
+}
+
+try {
+    $response = $client->send($request);
+} finally {
+    $slot->release(); // идемпотентно: повторный вызов не доходит до хранилища
+}
+```
+
+| Метод | Ждёт до `maxWait` | Когда всё занято |
+|---|---|---|
+| `call()` | да | бросает `BulkheadFullException` |
+| `acquire(): Slot` | да | бросает `BulkheadFullException` |
+| `tryAcquire(): ?Slot` | нет | возвращает `null` (`onRejected` всё равно срабатывает) |
+
+У `SharedBulkhead` та же пара `acquire()` / `tryAcquire()` без аргументов
+имени и лимита. Неотпущенный слот возвращается по истечении lease (Redis,
+APCu); `InMemoryBulkheadStore` lease игнорирует, там слот остаётся занятым.
+
+### Подсказка для повтора в `BulkheadFullException`
+
+Исключение несёт, сколько вызов прождал (`$e->waited`), и lease bulkhead
+(`$e->lease`). `$e->retryAfter()` возвращает lease: каждый занятый сейчас
+слот освободится в пределах одного lease — его отпустит владелец или заберёт
+истечение lease, — так что это честный потолок для `Retry-After`. Обычно слот
+освобождается намного раньше, и его может перехватить другой ожидающий.
+
+```php
+try {
+    $perProxy->call($name, $limit, $send);
+} catch (BulkheadFullException $e) {
+    $response = $response->withStatus(503)->withHeader('Retry-After', (string) $e->retryAfter()?->toSeconds());
+}
+```
+
+Подсказка относительная, в отличие от `CircuitOpenException::$retryAfter` из
+circuit-breaker — абсолютного момента времени: у bulkhead нет часов, к которым
+его привязать. У исключения, созданного вручную, оба поля равны null.
+
 ### Выбор наименее нагруженного bulkhead
 
 Когда запрос может пойти через любой из многих bulkhead'ов (пул upstream-прокси,
@@ -135,7 +208,9 @@ hash slot, — добавьте hash tag в префикс: `new RedisBulkheadSt
 | Тип | Описание |
 |---|---|
 | `Bulkhead` | Интерфейс: `call(callable): mixed`, `availableSlots(): int` |
-| `SharedBulkhead` | Ограничивает параллелизм через `BulkheadStore`; fast-fail или ожидание до `maxWait`; открывает `name()`, `maxConcurrent()` |
+| `SharedBulkhead` | Ограничивает параллелизм через `BulkheadStore`; fast-fail или ожидание до `maxWait`; открывает `name()`, `maxConcurrent()`, `acquire(): Slot`, `tryAcquire(): ?Slot` |
+| `KeyedBulkhead` | Та же семантика, имя и лимит передаются в каждый вызов: `call(name, max, cb)`, `acquire(name, max): Slot`, `tryAcquire(name, max): ?Slot`, `availableSlots(name, max)` |
+| `Slot` | Один занятый слот как значение: `name()`, `release()` (идемпотентно), `isReleased()` |
 | `BulkheadStore` | Backing-хранилище: `tryAcquire`, `release`, `activeCount` |
 | `BatchBulkheadStore` | `BulkheadStore` + `activeCounts(list $names): array` — один снимок для многих имён |
 | `RedisBulkheadStore` | Межхостовое cross-process-хранилище; sorted set + Lua, атомарный acquire, TTL lease; batch-снимок за один round trip |
@@ -145,8 +220,8 @@ hash slot, — добавьте hash tag в префикс: `new RedisBulkheadSt
 | `BulkheadMultiKeyScriptRunner` | `BulkheadScriptRunner` + `runMany(script, keys, args): list<int>` — нужен для `activeCounts()` за один round trip |
 | `Redis\PredisScriptRunner` | `BulkheadMultiKeyScriptRunner` поверх predis; EVALSHA с откатом на EVAL |
 | `Redis\PhpRedisScriptRunner` | `BulkheadMultiKeyScriptRunner` поверх `ext-redis`; EVALSHA с откатом на EVAL |
-| `BulkheadFullException` | Выбрасывается, когда за `maxWait` нет свободного слота; несёт `name`, `maxConcurrent` |
-| `Sleeper\SleeperInterface` | Стратегия ожидания при polling; `SystemSleeper`, `FakeSleeper` |
+| `BulkheadFullException` | Выбрасывается, когда за `maxWait` нет свободного слота; несёт `name`, `maxConcurrent`, `waited`, `lease`; `retryAfter(): ?Duration` |
+| `Sleeper\SleeperInterface` | Стратегия ожидания при polling; `SystemSleeper`, `FakeSleeper` (необязательный хук `onSleep`, например чтобы двигать fake-часы) |
 
 ### Подбор параметров
 

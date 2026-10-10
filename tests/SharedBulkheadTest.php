@@ -7,6 +7,8 @@ namespace Rasuvaeff\Bulkhead\Tests;
 use Rasuvaeff\Bulkhead\BulkheadFullException;
 use Rasuvaeff\Bulkhead\BulkheadStore;
 use Rasuvaeff\Bulkhead\InMemoryBulkheadStore;
+use Rasuvaeff\Bulkhead\Internal\Limits;
+use Rasuvaeff\Bulkhead\Internal\SlotWaiter;
 use Rasuvaeff\Bulkhead\SharedBulkhead;
 use Rasuvaeff\Bulkhead\Sleeper\FakeSleeper;
 use Rasuvaeff\Duration\Duration;
@@ -26,6 +28,8 @@ use function Rasuvaeff\Understudy\when;
 #[Covers(SharedBulkhead::class)]
 #[Covers(BulkheadFullException::class)]
 #[Covers(FakeSleeper::class)]
+#[Covers(SlotWaiter::class)]
+#[Covers(Limits::class)]
 final class SharedBulkheadTest
 {
     public function runsCallbackAndReturnsItsResult(): void
@@ -571,6 +575,202 @@ final class SharedBulkheadTest
             'maxWaitMillis' => Gen::intBetween(0, 2000),
             'pollMillis' => Gen::intBetween(10, 200),
         ];
+    }
+
+    public function fullExceptionCarriesWaitedTimeAndLeaseAsRetryHint(): void
+    {
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->neverGrantsStore(),
+            lease: Duration::seconds(7),
+            maxWait: Duration::millis(120),
+            pollInterval: Duration::millis(50),
+            sleeper: new FakeSleeper(),
+        );
+        $caught = null;
+
+        try {
+            $bulkhead->call(static fn(): int => 1);
+        } catch (BulkheadFullException $e) {
+            $caught = $e;
+        }
+
+        Assert::same($caught?->waited?->toMillis(), 120);
+        Assert::same($caught?->lease?->toMillis(), 7_000);
+        Assert::same($caught?->retryAfter()?->toMillis(), 7_000);
+    }
+
+    public function fullExceptionBuiltByHandHasNoHint(): void
+    {
+        $e = new BulkheadFullException(name: 'svc', maxConcurrent: 2);
+
+        Assert::null($e->waited);
+        Assert::null($e->lease);
+        Assert::null($e->retryAfter());
+    }
+
+    public function acquireHandsOverASlotThatOutlivesTheCall(): void
+    {
+        $bulkhead = $this->bulkhead(maxConcurrent: 1);
+
+        $slot = $bulkhead->acquire();
+
+        Assert::same($slot->name(), 'svc');
+        Assert::same($bulkhead->availableSlots(), 0);
+
+        $slot->release();
+
+        Assert::same($bulkhead->availableSlots(), 1);
+    }
+
+    public function acquireWaitsThenThrowsWhenFull(): void
+    {
+        $sleeper = new FakeSleeper();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->neverGrantsStore(),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(100),
+            pollInterval: Duration::millis(50),
+            sleeper: $sleeper,
+        );
+
+        Expect::exception(BulkheadFullException::class)->withMessageContaining('Bulkhead "svc" is full (max 1 concurrent)');
+
+        try {
+            $bulkhead->acquire();
+        } finally {
+            Assert::same($sleeper->totalSlept()->toMillis(), 100);
+        }
+    }
+
+    public function acquireRunsOnAcceptedWithTimeWaited(): void
+    {
+        $seen = [];
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $this->scriptedStore(nullsBeforeToken: 1),
+            lease: Duration::seconds(5),
+            maxWait: Duration::millis(500),
+            pollInterval: Duration::millis(50),
+            sleeper: new FakeSleeper(),
+            onAccepted: static function (string $name, Duration $waited) use (&$seen): void {
+                $seen[] = [$name, $waited->toMillis()];
+            },
+        );
+
+        $bulkhead->acquire();
+
+        Assert::same($seen, [['svc', 50]]);
+    }
+
+    public function throwingOnAcceptedReleasesTheAcquiredSlot(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            onAccepted: static function (string $name, Duration $waited): void {
+                throw new \RuntimeException('metrics backend down');
+            },
+        );
+
+        try {
+            $bulkhead->acquire();
+            Assert::true(actual: false);
+        } catch (\RuntimeException $e) {
+            Assert::same($e->getMessage(), 'metrics backend down');
+        }
+
+        Assert::same($store->activeCount('svc'), 0);
+    }
+
+    public function tryAcquireReturnsNullWithoutWaitingWhenFull(): void
+    {
+        $sleeper = new FakeSleeper();
+        $rejected = [];
+        $store = new InMemoryBulkheadStore();
+        $store->tryAcquire('svc', 1, Duration::seconds(5));
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::seconds(1),
+            sleeper: $sleeper,
+            onRejected: static function (string $name, Duration $waited) use (&$rejected): void {
+                $rejected[] = [$name, $waited->toMicros()];
+            },
+        );
+
+        Assert::null($bulkhead->tryAcquire());
+        Assert::same($sleeper->slept(), []);
+        Assert::same($rejected, [['svc', 0]]);
+    }
+
+    public function tryAcquireTakesAFreeSlotAndRunsOnAccepted(): void
+    {
+        $accepted = [];
+        $store = new InMemoryBulkheadStore();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 2,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            onAccepted: static function (string $name, Duration $waited) use (&$accepted): void {
+                $accepted[] = [$name, $waited->toMicros()];
+            },
+        );
+
+        $slot = $bulkhead->tryAcquire();
+
+        Assert::same($slot?->name(), 'svc');
+        Assert::same($store->activeCount('svc'), 1);
+        Assert::same($accepted, [['svc', 0]]);
+    }
+
+    public function throwingOnAcceptedInTryAcquireReleasesTheSlot(): void
+    {
+        $store = new InMemoryBulkheadStore();
+        $bulkhead = new SharedBulkhead(
+            name: 'svc',
+            maxConcurrent: 1,
+            store: $store,
+            lease: Duration::seconds(5),
+            maxWait: Duration::zero(),
+            onAccepted: static function (string $name, Duration $waited): void {
+                throw new \RuntimeException('metrics backend down');
+            },
+        );
+
+        try {
+            $bulkhead->tryAcquire();
+            Assert::true(actual: false);
+        } catch (\RuntimeException) {
+        }
+
+        Assert::same($store->activeCount('svc'), 0);
+    }
+
+    public function fakeSleeperRunsOnSleepAfterRecording(): void
+    {
+        $seen = [];
+        $sleeper = new FakeSleeper(onSleep: static function (Duration $d) use (&$seen, &$sleeper): void {
+            $seen[] = [$d->toMillis(), count($sleeper->slept())];
+        });
+
+        $sleeper->sleep(Duration::millis(30));
+        $sleeper->sleep(Duration::millis(20));
+
+        Assert::same($seen, [[30, 1], [20, 2]]);
+        Assert::same($sleeper->totalSlept()->toMillis(), 50);
     }
 
     private function bulkhead(int $maxConcurrent): SharedBulkhead
