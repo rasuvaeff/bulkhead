@@ -9,6 +9,7 @@ use Rasuvaeff\Bulkhead\BulkheadStore;
 use Rasuvaeff\Bulkhead\Sleeper\SleeperInterface;
 use Rasuvaeff\Bulkhead\Sleeper\SystemSleeper;
 use Rasuvaeff\Bulkhead\Slot;
+use Rasuvaeff\Context\Context;
 use Rasuvaeff\Duration\Duration;
 
 /**
@@ -36,6 +37,7 @@ final readonly class SlotWaiter
         ?SleeperInterface $sleeper,
         private ?\Closure $onAccepted,
         private ?\Closure $onRejected,
+        private ?Context $context = null,
     ) {
         if ($lease->isZero()) {
             throw new \InvalidArgumentException('Lease must be greater than zero');
@@ -51,6 +53,21 @@ final readonly class SlotWaiter
 
         $this->pollInterval = $pollInterval;
         $this->sleeper = $sleeper ?? new SystemSleeper();
+    }
+
+    public function withContext(Context $context): self
+    {
+        return new self(
+            store: $this->store,
+            lease: $this->lease,
+            maxWait: $this->maxWait,
+            pollInterval: $this->pollInterval,
+            pollJitter: $this->pollJitter,
+            sleeper: $this->sleeper,
+            onAccepted: $this->onAccepted,
+            onRejected: $this->onRejected,
+            context: $context,
+        );
     }
 
     /**
@@ -123,6 +140,13 @@ final readonly class SlotWaiter
         $waited = Duration::zero();
 
         while (true) {
+            // Read the budget before the check: once assertActive() passes it
+            // is at least 1 ms. A terminated context takes no slot and ends
+            // the wait with its own exception, not BulkheadFullException —
+            // the caller's budget ran out, the bulkhead is not overloaded.
+            $budgetMs = $this->context?->remainingMs();
+            $this->context?->assertActive();
+
             $token = $this->store->tryAcquire(name: $name, maxConcurrent: $maxConcurrent, lease: $this->lease);
 
             if ($token !== null) {
@@ -144,6 +168,9 @@ final readonly class SlotWaiter
             }
 
             $sleep = Duration::min($remaining, $this->jitteredPollInterval());
+            if ($budgetMs !== null) {
+                $sleep = Duration::min($sleep, Duration::millis(max(1, (int) $budgetMs)));
+            }
             $this->sleeper->sleep($sleep);
             $waited = $waited->plus($sleep);
         }

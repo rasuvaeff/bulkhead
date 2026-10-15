@@ -206,43 +206,43 @@ hash slot, — добавьте hash tag в префикс: `new RedisBulkheadSt
 ### Дедлайны запроса (`rasuvaeff/context`)
 
 `maxWait` задаётся при создании, а оставшийся бюджет у каждого запроса свой:
-запрос, у которого осталось 100 мс, может прождать слот 200 мс и всё равно
-упасть. `SharedBulkhead` хранит состояние в store, поэтому создавать его на
-каждый вызов дёшево — ограничьте ожидание остатком бюджета
+запрос, у которого осталось 100 мс, не должен ждать слот 200 мс.
+`withContext()` возвращает представление того же bulkhead (то же имя, лимит и
+слоты), ожидание в котором ограничено остатком бюджета
 [`rasuvaeff/context`](https://github.com/rasuvaeff/context):
 
 ```php
-use Rasuvaeff\Bulkhead\BulkheadStore;
-use Rasuvaeff\Context\Context;
+use Rasuvaeff\Context\ContextExpiredException;
 
-function legacyApi(Context $context, BulkheadStore $store): SharedBulkhead
-{
-    $maxWait = Duration::millis(200);
-    $remainingMs = $context->remainingMs(); // null = дедлайна нет, >= 1 пока активен
-
-    return new SharedBulkhead(
-        name: 'legacy-api',
-        maxConcurrent: 10,
-        store: $store,
-        lease: Duration::seconds(5),
-        maxWait: $remainingMs === null ? $maxWait : Duration::min($maxWait, Duration::millis((int) $remainingMs)),
-    );
+try {
+    $result = $bulkhead->withContext($context)->call(static fn(): string => callDownstream($context));
+} catch (BulkheadFullException $full) {
+    // первым кончился maxWait: зависимость перегружена
+} catch (ContextExpiredException $expired) {
+    // первым кончился бюджет вызывающего: это не сигнал перегрузки
 }
-
-$context->assertActive();
-$result = legacyApi($context, $store)->call(static fn(): string => callDownstream($context));
 ```
 
-Имя и лимит те же, поэтому все экземпляры на вызов делят один набор слотов.
-`KeyedBulkhead` тоже принимает `maxWait` при создании — создавайте его на
-вызов так же.
+| Что кончилось первым | Исключение | `onRejected` |
+|---|---|---|
+| `maxWait` | `BulkheadFullException` | вызывается |
+| Бюджет контекста | `ContextExpiredException` | не вызывается |
+| Контекст отменён (в т.ч. сигналом через `requestCancel()`) | `ContextCancelledException` | не вызывается |
+
+Завершённый контекст слот не занимает вовсе. Ожидание проверяет контекст
+перед каждым опросом и спит отрезками не длиннее остатка бюджета — через тот
+же `Sleeper` (`FakeSleeper` с `onSleep` может двигать
+`Testing\FakeTimeSource` контекста). `SharedBulkhead` реализует
+`ContextAwareBulkhead`; `rasuvaeff/resilience` использует это, чтобы
+ограничивать ожидание автоматически.
 
 ### Публичный API
 
 | Тип | Описание |
 |---|---|
 | `Bulkhead` | Интерфейс: `call(callable): mixed`, `availableSlots(): int` |
-| `SharedBulkhead` | Ограничивает параллелизм через `BulkheadStore`; fast-fail или ожидание до `maxWait`; открывает `name()`, `maxConcurrent()`, `acquire(): Slot`, `tryAcquire(): ?Slot` |
+| `ContextAwareBulkhead` | `Bulkhead` + `withContext(Context): Bulkhead` — ожидание, ограниченное бюджетом `rasuvaeff/context` |
+| `SharedBulkhead` | Ограничивает параллелизм через `BulkheadStore`; fast-fail или ожидание до `maxWait`; открывает `name()`, `maxConcurrent()`, `acquire(): Slot`, `tryAcquire(): ?Slot`, `withContext()` |
 | `KeyedBulkhead` | Та же семантика, имя и лимит передаются в каждый вызов: `call(name, max, cb)`, `acquire(name, max): Slot`, `tryAcquire(name, max): ?Slot`, `availableSlots(name, max)` |
 | `Slot` | Один занятый слот как значение: `name()`, `release()` (идемпотентно), `isReleased()` |
 | `BulkheadStore` | Backing-хранилище: `tryAcquire`, `release`, `activeCount` |

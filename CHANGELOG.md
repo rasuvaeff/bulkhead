@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.4.0 — 2026-10-15
+
+- Add `ContextAwareBulkhead` and `SharedBulkhead::withContext(Context)`: the same slots, with the wait capped by a `rasuvaeff/context` budget (#48). When the budget ends first the wait ends with `ContextExpiredException`/`ContextCancelledException` — not `BulkheadFullException`, and `onRejected` is not called: the caller's exhausted budget is not an overload signal. A terminated context takes no slot. `rasuvaeff/context` ^0.3 becomes a runtime dependency.
+- CI: experimental PHP 8.6 job (RC, tests only, not required).
+
 ## 1.3.0 — 2026-10-10
 
 - Add `KeyedBulkhead`: the same wait, lease and observer semantics as `SharedBulkhead`, with the name and limit passed per call (`call(name, max, cb)`, `acquire()`, `tryAcquire()`, `availableSlots()`) — for one limit per proxy, tenant or browser context without dropping to the raw `BulkheadStore` and a hand-written `try`/`finally` (#43).

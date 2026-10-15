@@ -56,6 +56,11 @@ Namespace `Rasuvaeff\Bulkhead`.
 - Implement `BulkheadScriptRunner` to back the Redis store with another client;
   also implement `BulkheadMultiKeyScriptRunner` or `activeCounts()` degrades to
   one call per name.
+- `SharedBulkhead::withContext(Context)` (interface `ContextAwareBulkhead`):
+  same slots, wait capped by the `rasuvaeff/context` budget. Budget first →
+  `ContextExpiredException`/`ContextCancelledException` (NOT
+  `BulkheadFullException`, `onRejected` NOT called); `maxWait` first →
+  `BulkheadFullException` as usual; terminated context → no slot taken.
 
 ## API
 
@@ -178,5 +183,17 @@ interface BulkheadMultiKeyScriptRunner extends BulkheadScriptRunner
 {
     /** @param list<string> $keys  @param list<int|string> $args  @return list<int> one per key, same order */
     public function runMany(string $script, array $keys, array $args): array;
+}
+```
+
+### Waiting under a context budget
+
+```php
+use Rasuvaeff\Context\ContextExpiredException;
+
+try {
+    $bulkhead->withContext($context)->call(fn(): string => callDownstream($context));
+} catch (BulkheadFullException) {      // maxWait ended first — saturation
+} catch (ContextExpiredException) {    // the caller's budget ended first
 }
 ```

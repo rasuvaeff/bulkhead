@@ -113,6 +113,14 @@ a `redis:7-alpine` service container + `REDIS_HOST`, plus `apcu`/`pcntl`/`redis`
   is fast-fail. The wait loop accumulates `Sleeper` time and clamps the last
   sleep with `Duration::minus` (saturating), so the budget is bounded but
   approximate (per-attempt Redis latency is not counted).
+- **Waiting under a context** (`withContext()` → internal
+  `ContextBoundBulkhead`, a `SlotWaiter` with a `Context`): the budget is read
+  **before** `assertActive()` at the top of every poll, each sleep is capped
+  by it (`max(1, …)` ms — never 0), and a terminated context ends the wait
+  with its own exception: never `BulkheadFullException`, never `onRejected`.
+  Budget and `maxWait` ending together: the context wins (checked first).
+  Tests move the context's `FakeTimeSource` from `FakeSleeper::onSleep` —
+  the bulkhead sleeps on its own Sleeper, the budget is on the context's clock.
 - `name` is validated (`/^[A-Za-z0-9_.:-]+\z/`) because it becomes a Redis/APCu key.
 - `pollJitter` (0.0..1.0) randomizes each poll sleep within ±(jitter × pollInterval)
   with a **1µs floor** — the `max(1, ...)` in `jitteredPollInterval` is what stops a
