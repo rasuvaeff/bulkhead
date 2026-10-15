@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Bulkhead;
 
+use Rasuvaeff\Bulkhead\Internal\ContextBoundBulkhead;
 use Rasuvaeff\Bulkhead\Internal\Limits;
 use Rasuvaeff\Bulkhead\Internal\SlotWaiter;
 use Rasuvaeff\Bulkhead\Sleeper\SleeperInterface;
+use Rasuvaeff\Context\Context;
 use Rasuvaeff\Duration\Duration;
 
 /**
@@ -18,7 +20,7 @@ use Rasuvaeff\Duration\Duration;
  *
  * @api
  */
-final readonly class SharedBulkhead implements Bulkhead
+final readonly class SharedBulkhead implements ContextAwareBulkhead
 {
     /** @var non-empty-string */
     private string $name;
@@ -91,6 +93,17 @@ final readonly class SharedBulkhead implements Bulkhead
     public function tryAcquire(): ?Slot
     {
         return $this->waiter->tryAcquire(name: $this->name, maxConcurrent: $this->maxConcurrent);
+    }
+
+    #[\Override]
+    public function withContext(Context $context): Bulkhead
+    {
+        return new ContextBoundBulkhead(
+            waiter: $this->waiter->withContext($context),
+            store: $this->store,
+            name: $this->name,
+            maxConcurrent: $this->maxConcurrent,
+        );
     }
 
     #[\Override]

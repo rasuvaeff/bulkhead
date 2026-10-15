@@ -24,6 +24,7 @@
     },
     "require": {
         "php": "8.3 - 8.5",
+        "rasuvaeff/context": "^0.3",
         "rasuvaeff/duration": "^1.0"
     },
     "require-dev": {

@@ -204,44 +204,43 @@ or Redis rejects the call with `CROSSSLOT`.
 
 ### Request deadlines (`rasuvaeff/context`)
 
-`maxWait` is fixed at construction, but a request's remaining budget is not:
-a request with 100 ms left can wait 200 ms for a slot and fail anyway.
-`SharedBulkhead` keeps its state in the store, so building one per call is
-cheap — cap the wait by the remaining
-[`rasuvaeff/context`](https://github.com/rasuvaeff/context) budget:
+`maxWait` is fixed at construction, but a request's remaining budget is not: a
+request with 100 ms left must not wait 200 ms for a slot. `withContext()`
+returns a view of the same bulkhead (same name, limit and slots) whose wait is
+capped by the remaining [`rasuvaeff/context`](https://github.com/rasuvaeff/context)
+budget:
 
 ```php
-use Rasuvaeff\Bulkhead\BulkheadStore;
-use Rasuvaeff\Context\Context;
+use Rasuvaeff\Context\ContextExpiredException;
 
-function legacyApi(Context $context, BulkheadStore $store): SharedBulkhead
-{
-    $maxWait = Duration::millis(200);
-    $remainingMs = $context->remainingMs(); // null = no deadline, >= 1 while active
-
-    return new SharedBulkhead(
-        name: 'legacy-api',
-        maxConcurrent: 10,
-        store: $store,
-        lease: Duration::seconds(5),
-        maxWait: $remainingMs === null ? $maxWait : Duration::min($maxWait, Duration::millis((int) $remainingMs)),
-    );
+try {
+    $result = $bulkhead->withContext($context)->call(static fn(): string => callDownstream($context));
+} catch (BulkheadFullException $full) {
+    // maxWait ran out first: the dependency is saturated
+} catch (ContextExpiredException $expired) {
+    // the caller's budget ran out first: not an overload signal
 }
-
-$context->assertActive();
-$result = legacyApi($context, $store)->call(static fn(): string => callDownstream($context));
 ```
 
-The name and the limit stay the same, so every per-call instance shares one
-set of slots. `KeyedBulkhead` takes `maxWait` at construction too; build it
-per call the same way.
+| Ends first | Exception | `onRejected` |
+|---|---|---|
+| `maxWait` | `BulkheadFullException` | called |
+| The context's budget | `ContextExpiredException` | not called |
+| The context is cancelled (incl. a signal via `requestCancel()`) | `ContextCancelledException` | not called |
+
+A terminated context takes no slot at all. The wait checks the context before
+each poll and sleeps in slices no longer than the remaining budget, through the
+same `Sleeper` (a `FakeSleeper` with `onSleep` can advance the context's
+`Testing\FakeTimeSource`). `SharedBulkhead` implements `ContextAwareBulkhead`;
+`rasuvaeff/resilience` uses it to cap the wait automatically.
 
 ### Public API
 
 | Type | Description |
 |---|---|
 | `Bulkhead` | Interface: `call(callable): mixed`, `availableSlots(): int` |
-| `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait`; exposes `name()`, `maxConcurrent()`, `acquire(): Slot`, `tryAcquire(): ?Slot` |
+| `ContextAwareBulkhead` | `Bulkhead` + `withContext(Context): Bulkhead` — the wait capped by a `rasuvaeff/context` budget |
+| `SharedBulkhead` | Limits concurrency using a `BulkheadStore`; fast-fails or waits up to `maxWait`; exposes `name()`, `maxConcurrent()`, `acquire(): Slot`, `tryAcquire(): ?Slot`, `withContext()` |
 | `KeyedBulkhead` | Same semantics with the name and limit passed per call: `call(name, max, cb)`, `acquire(name, max): Slot`, `tryAcquire(name, max): ?Slot`, `availableSlots(name, max)` |
 | `Slot` | One held slot as a value: `name()`, `release()` (idempotent), `isReleased()` |
 | `BulkheadStore` | Backing store: `tryAcquire`, `release`, `activeCount` |
