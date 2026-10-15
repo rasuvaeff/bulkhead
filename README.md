@@ -202,6 +202,40 @@ per-name read, so the snapshot is per name rather than across names.
 put a hash tag in the prefix — `new RedisBulkheadStore($runner, '{bulkhead}:')` —
 or Redis rejects the call with `CROSSSLOT`.
 
+### Request deadlines (`rasuvaeff/context`)
+
+`maxWait` is fixed at construction, but a request's remaining budget is not:
+a request with 100 ms left can wait 200 ms for a slot and fail anyway.
+`SharedBulkhead` keeps its state in the store, so building one per call is
+cheap — cap the wait by the remaining
+[`rasuvaeff/context`](https://github.com/rasuvaeff/context) budget:
+
+```php
+use Rasuvaeff\Bulkhead\BulkheadStore;
+use Rasuvaeff\Context\Context;
+
+function legacyApi(Context $context, BulkheadStore $store): SharedBulkhead
+{
+    $maxWait = Duration::millis(200);
+    $remainingMs = $context->remainingMs(); // null = no deadline, >= 1 while active
+
+    return new SharedBulkhead(
+        name: 'legacy-api',
+        maxConcurrent: 10,
+        store: $store,
+        lease: Duration::seconds(5),
+        maxWait: $remainingMs === null ? $maxWait : Duration::min($maxWait, Duration::millis((int) $remainingMs)),
+    );
+}
+
+$context->assertActive();
+$result = legacyApi($context, $store)->call(static fn(): string => callDownstream($context));
+```
+
+The name and the limit stay the same, so every per-call instance shares one
+set of slots. `KeyedBulkhead` takes `maxWait` at construction too; build it
+per call the same way.
+
 ### Public API
 
 | Type | Description |

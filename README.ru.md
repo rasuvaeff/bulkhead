@@ -203,6 +203,40 @@ $leastLoaded = (string) array_search(min($counts), $counts, true); // (string): 
 hash slot, — добавьте hash tag в префикс: `new RedisBulkheadStore($runner,
 '{bulkhead}:')`, иначе Redis отвергнет вызов с `CROSSSLOT`.
 
+### Дедлайны запроса (`rasuvaeff/context`)
+
+`maxWait` задаётся при создании, а оставшийся бюджет у каждого запроса свой:
+запрос, у которого осталось 100 мс, может прождать слот 200 мс и всё равно
+упасть. `SharedBulkhead` хранит состояние в store, поэтому создавать его на
+каждый вызов дёшево — ограничьте ожидание остатком бюджета
+[`rasuvaeff/context`](https://github.com/rasuvaeff/context):
+
+```php
+use Rasuvaeff\Bulkhead\BulkheadStore;
+use Rasuvaeff\Context\Context;
+
+function legacyApi(Context $context, BulkheadStore $store): SharedBulkhead
+{
+    $maxWait = Duration::millis(200);
+    $remainingMs = $context->remainingMs(); // null = дедлайна нет, >= 1 пока активен
+
+    return new SharedBulkhead(
+        name: 'legacy-api',
+        maxConcurrent: 10,
+        store: $store,
+        lease: Duration::seconds(5),
+        maxWait: $remainingMs === null ? $maxWait : Duration::min($maxWait, Duration::millis((int) $remainingMs)),
+    );
+}
+
+$context->assertActive();
+$result = legacyApi($context, $store)->call(static fn(): string => callDownstream($context));
+```
+
+Имя и лимит те же, поэтому все экземпляры на вызов делят один набор слотов.
+`KeyedBulkhead` тоже принимает `maxWait` при создании — создавайте его на
+вызов так же.
+
 ### Публичный API
 
 | Тип | Описание |
