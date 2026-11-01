@@ -12,6 +12,11 @@
     // entirely in testo/infection, it isn't merely deprioritized). Needs
     // REDIS_HOST + ext-apcu (apc.enable_cli=1) reachable, or their MSI drops.
     //
+    // Run with `--with-uncovered` (composer mutation): code the tests execute but do
+    // not name in #[Covers] is counted as Not Covered instead of being invisible, so
+    // the MSI below is the overall one (measured 91% without the signature ignore
+    // below, 93% with it).
+    //
     // 86 is the honest floor for what infection's coverage-based test selection
     // can see (the equivalent `max(0,x)`->`max(-1,x)` mutants are provably
     // unkillable - x is never negative - but occasionally register as "killed"
@@ -25,12 +30,9 @@
     //  - RedisBulkheadStore::activeCounts `$replies[$index] ?? 0` -> `?? -1`: the
     //    missing-reply default sits inside the same `max(0, ...)` clamp, so any
     //    value <= 0 is observably identical;
-    //  - ApcuBulkheadStore/RedisBulkheadStore key-concat reorder (`$a.$b`-> `$b.$a`):
-    //    cosmetic, no test can distinguish two equally-injective orderings;
-    //  - ApcuBulkheadStore::lockKey ConcatOperandRemoval (drops prefix or name):
-    //    verified with differentKeyPrefixesAreIsolated/namesAreIsolated still
-    //    passing - collapses two stores'/names' lock onto the same key, which only
-    //    adds contention, the slots key (and thus correctness) stays unaffected;
+    //  - ApcuBulkheadStore::tryAcquire `apcu_store(...) !== true` -> `return null`
+    //    removal (the one Not Covered mutant left): apcu_store failing needs a
+    //    full APCu segment, not reachable without faking the extension;
     //  - ApcuBulkheadStore::lock loop off-by-one (`$attempt=-1` / `<=`): changes
     //    the retry budget by one iteration, unobservable externally;
     //  - ApcuBulkheadStore::liveSlots `>` -> `>=`: a millisecond-boundary
@@ -42,6 +44,9 @@
     //  - ApcuBulkheadStore::isAvailable `&&` -> `||`: only distinguishable when
     //    ext-apcu is loaded but apc.enable_cli is off, a CLI-disabled-but-loaded
     //    state the test environments don't construct;
+    //  - Internal\SlotWaiter::wait `max(1, (int) $budgetMs)` -> `max(0, ...)`: a
+    //    context budget under 1 ms; a sub-millisecond-budget test was tried and did
+    //    not kill it, so it is left as a known survivor;
     //  - Internal\SlotWaiter::jitteredPollInterval ReturnRemoval on the jitter==0 early
     //    return: the fall-through computes maxDelta=0 and returns an identical
     //    interval — performance-only;
@@ -55,6 +60,20 @@
     "minMsi": 89,
     "mutators": {
         "@default": true,
+        // Constructor/method parameter declarations with a default value
+        // (`private int $x = 100,`, `float $pollJitter = 0.0,`): the mutant sits on a
+        // signature line with no executable opcode under pcov, so it is reported Not
+        // Covered whatever the tests do. Only a type-prefixed `$name = default,` line
+        // matches; a body line cannot (no type before the variable).
+        "global-ignoreSourceCodeByRegex": [
+            "(?:(?:private|protected|public|readonly)\\s+)*\\??[A-Za-z_\\\\][\\w\\\\|]*\\s+\\$\\w+\\s*=\\s*[^,;]+,"
+        ],
+        // Off: with --with-uncovered a PublicVisibility mutant sits on a parameterless
+        // method's signature line, which has no executable opcode under pcov/xdebug,
+        // so it is reported Not Covered and can never be killed, whatever #[Covers]
+        // says. Measured on pinned-http-client 2026-11-01: 4 of 4 such mutants were
+        // Not Covered, none killed.
+        "PublicVisibility": false,
         "Identical": {
             // ApcuBulkheadStore::lock's `apcu_add(...) === true` flipped to `!==`
             // genuinely breaks mutual exclusion under concurrent contention -

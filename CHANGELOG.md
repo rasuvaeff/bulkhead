@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- Mutation testing now runs with `--with-uncovered`, so code that tests execute but do not name in `#[Covers]` counts toward the MSI instead of being invisible. Added integration tests for `ApcuBulkheadStore` (key layout, internal lock held) and `PhpRedisScriptRunner` (script error reporting); `PublicVisibility` and parameter-default signature mutants, which no test can reach under pcov, are excluded in `infection.json5`. No `src` changes.
+
 ## 1.4.0 — 2026-10-15
 
 - Add `ContextAwareBulkhead` and `SharedBulkhead::withContext(Context)`: the same slots, with the wait capped by a `rasuvaeff/context` budget (#48). When the budget ends first the wait ends with `ContextExpiredException`/`ContextCancelledException` — not `BulkheadFullException`, and `onRejected` is not called: the caller's exhausted budget is not an overload signal. A terminated context takes no slot. `rasuvaeff/context` ^0.3 becomes a runtime dependency.

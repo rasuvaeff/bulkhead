@@ -98,6 +98,57 @@ final class ApcuBulkheadIntegrationTest
         Assert::same($storeB->activeCount(self::NAME), 1);
     }
 
+    public function slotsAreStoredUnderPrefixThenName(): void
+    {
+        if ($this->store === null) {
+            return;
+        }
+
+        $store = new ApcuBulkheadStore('px:');
+
+        Assert::true($store->tryAcquire('slots', 2, Duration::seconds(30)) !== null);
+
+        $stored = apcu_fetch('px:slots');
+        Assert::true(is_array($stored));
+        Assert::same(count($stored), 1);
+        Assert::false(apcu_exists('slotspx:'));
+    }
+
+    public function acquireReturnsNullWhenTheInternalLockIsHeld(): void
+    {
+        if ($this->store === null) {
+            return;
+        }
+
+        $store = new ApcuBulkheadStore('px:', lockMaxAttempts: 3, lockRetryMicros: 50_000);
+        apcu_add('px:lock:held', true, 60);
+
+        $startedAt = hrtime(as_number: true);
+        $token = $store->tryAcquire('held', 5, Duration::seconds(30));
+        $elapsedMs = (hrtime(as_number: true) - $startedAt) / 1_000_000;
+
+        Assert::null($token);
+        Assert::true($elapsedMs >= 100.0);
+        Assert::same($store->activeCount('held'), 0);
+    }
+
+    public function releaseLeavesTheSlotWhenTheInternalLockIsHeld(): void
+    {
+        if ($this->store === null) {
+            return;
+        }
+
+        $store = new ApcuBulkheadStore('px:', lockMaxAttempts: 2, lockRetryMicros: 1);
+        $token = $store->tryAcquire('held', 5, Duration::seconds(30));
+        Assert::true($token !== null);
+
+        apcu_add('px:lock:held', true, 60);
+        $store->release('held', $token);
+        apcu_delete('px:lock:held');
+
+        Assert::same($store->activeCount('held'), 1);
+    }
+
     public function releaseFreesASlot(): void
     {
         if ($this->store === null) {

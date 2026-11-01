@@ -100,4 +100,27 @@ final class PhpRedisIntegrationTest
 
         Assert::true($this->store->tryAcquire(self::NAME, 1, Duration::seconds(30)) !== null);
     }
+
+    public function scriptErrorIsReportedOnceAndDoesNotPoisonLaterCalls(): void
+    {
+        if (!isset($this->store)) {
+            return;
+        }
+
+        $this->client->set('bulkhead:wrongtype', 'not-a-sorted-set');
+
+        $message = null;
+
+        try {
+            $this->store->tryAcquire('wrongtype', 1, Duration::seconds(30));
+        } catch (\RuntimeException $e) {
+            $message = $e->getMessage();
+        }
+
+        Assert::string((string) $message)->contains('Redis script failed');
+
+        $this->client->del('bulkhead:wrongtype');
+
+        Assert::true($this->store->tryAcquire('wrongtype', 1, Duration::seconds(30)) !== null);
+    }
 }
