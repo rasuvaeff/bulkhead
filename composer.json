@@ -24,7 +24,7 @@
     },
     "require": {
         "php": "8.3 - 8.5",
-        "rasuvaeff/context": "^0.3",
+        "rasuvaeff/context": "^0.3 || ^0.4 || ^0.5",
         "rasuvaeff/duration": "^1.0"
     },
     "require-dev": {
@@ -40,7 +40,7 @@
         "roave/backward-compatibility-check": "^8.0",
         "testo/bridge-infection": "^0.1.6",
         "testo/testo": "^0.10.25",
-        "vimeo/psalm": "^7.0"
+        "vimeo/psalm": "^7.11"
     },
     "suggest": {
         "ext-apcu": "Required to use ApcuBulkheadStore for single-host concurrency limiting",
