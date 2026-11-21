@@ -16,4 +16,15 @@
     <enableExtensions>
         <extension name="redis"/>
     </enableExtensions>
+
+    <issueHandlers>
+        <!-- Redis identifies scripts for EVALSHA by their SHA-1; no other hash
+             is accepted, so the weak-hash finding does not apply here. -->
+        <WeakHash>
+            <errorLevel type="info">
+                <file name="src/Redis/PhpRedisScriptRunner.php"/>
+                <file name="src/Redis/PredisScriptRunner.php"/>
+            </errorLevel>
+        </WeakHash>
+    </issueHandlers>
 </psalm>
