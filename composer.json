@@ -23,7 +23,7 @@
         "source": "https://github.com/rasuvaeff/bulkhead"
     },
     "require": {
-        "php": "8.3 - 8.5",
+        "php": "8.3 - 8.6",
         "rasuvaeff/context": "^0.3 || ^0.4 || ^0.5",
         "rasuvaeff/duration": "^1.0"
     },

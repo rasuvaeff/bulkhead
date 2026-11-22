@@ -18,7 +18,7 @@ Namespace `Rasuvaeff\Bulkhead`.
 
 ## Rules
 
-- PHP 8.3+, `declare(strict_types=1)`, immutable `final readonly` classes.
+- PHP 8.3 – 8.6, `declare(strict_types=1)`, immutable `final readonly` classes.
 - `lease` MUST exceed the longest expected callback runtime, or the slot is
   reclaimed mid-call and concurrency exceeds `maxConcurrent`. Rule of thumb:
   downstream timeout + margin.

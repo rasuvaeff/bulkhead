@@ -26,7 +26,7 @@
 
 ## Требования
 
-- PHP 8.3+
+- PHP 8.3 – 8.6
 - [`rasuvaeff/duration`](https://github.com/rasuvaeff/duration) для типизированных значений lease/wait
 - Для межхостового ограничения (`RedisBulkheadStore`): доступный Redis-сервер
   плюс **один** Redis-клиент — [`predis/predis`](https://github.com/predis/predis)
