@@ -25,7 +25,7 @@ try) — a bulkhead decides *how many at once*.
 
 ## Requirements
 
-- PHP 8.3+
+- PHP 8.3 – 8.6
 - [`rasuvaeff/duration`](https://github.com/rasuvaeff/duration) for the typed lease/wait values
 - For multi-host cross-process limiting (`RedisBulkheadStore`): a reachable Redis
   server plus **one** Redis client — [`predis/predis`](https://github.com/predis/predis)
