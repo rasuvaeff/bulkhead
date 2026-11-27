@@ -43,7 +43,7 @@ a `BulkheadStore`. Namespace `Rasuvaeff\Bulkhead`.
    Splitting either reintroduces the check-then-incr race the package exists
    to prevent.
 
-6. **`name` must match `/^[A-Za-z0-9_.:-]+$/`** (it becomes a Redis/APCu key),
+6. **`name` must match `/^[A-Za-z0-9_.:-]+\z/`** (it becomes a Redis/APCu key),
    and on Redis `availableSlots()`/`activeCount()` WRITE (they prune expired
    members) — don't point the store at a read-only replica.
 
